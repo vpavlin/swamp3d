@@ -1,6 +1,6 @@
 # 0014. Subscribe to categories; nobody mirrors the whole catalogue
 
-- Status: Accepted (design; not built yet). Supersedes the "every node holds everything" part of 0009.
+- Status: Accepted. Built in 0.2.0 (category topics, subscriptions, per-topic catch-up, lazy pictures); per-model record fetch comes with 0015. Supersedes the "every node holds everything" part of 0009.
 - Date: 2026-10-05
 
 ## Context

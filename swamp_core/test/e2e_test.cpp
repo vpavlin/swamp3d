@@ -62,7 +62,15 @@ int main(int argc, char** argv) {
     CHECK(waitFor([&] { return json::parse(bob->core.listModels("{}"))["models"].size() == 1; }), "bob's catalogue shows the model");
     json card = json::parse(bob->core.listModels(json{{"q", "bracelet"}}.dump()))["models"][0];
     CHECK(card["creatorName"] == "Alice" && card["licence"] == "CC-BY-4.0", "card: creator name + licence");
-    CHECK(waitFor([&] { return !json::parse(bob->core.listModels("{}"))["models"][0]["thumb"].is_null(); }), "bob fetched the thumbnail eagerly");
+    {   // pictures are lazy (ADR 0014): nothing is fetched until the view asks for it
+        std::string vdir0 = root + "/plugins0/swamp"; fs::create_directories(vdir0);
+        json c0 = json::parse(bob->core.listModels("{}"))["models"][0];
+        pump(500);
+        CHECK(c0["thumb"].is_null() && c0.value("thumbSha", "").size() == 64, "the thumbnail isn't fetched before anyone looks at it");
+        json first = json::parse(bob->core.cacheImage(c0["thumbSha"], vdir0));
+        CHECK(first.value("pending", false), "asking for it starts the fetch (pending)");
+        CHECK(waitFor([&] { return json::parse(bob->core.cacheImage(c0["thumbSha"], vdir0)).value("ok", false); }, 5000), "...and it arrives");
+    }
     json model = json::parse(bob->core.getModel(mid))["model"];
     json v1 = model["versions"][0];
     CHECK(v1["files"][0]["name"] == "74890.stl" && v1["images"][0]["kind"] == "thumb", "version lists the STL and an auto thumbnail");
@@ -136,7 +144,7 @@ int main(int argc, char** argv) {
         swamp::Identity mid2 = swamp::identityFrom(logos_sync::generatePrivateKey());
         swamp::Event ev = swamp::makeEvent(mid2, "blob.cids", json{{"cids", {{realSha, fakeCid}}}}, 1, "bogus1");
         for (auto* n : FakeLoamBus::get().nodes) if (n->onRecv && n != &mallory->bus)
-            n->onRecv(swamp::CATALOG_TOPIC, "x", FakeLoamBus::b64(json{{"t", "ev"}, {"e", logos_sync::eventToJson(ev)}}.dump()), 0);
+            n->onRecv(swamp::categoryTopic("other"), "x", FakeLoamBus::b64(json{{"t", "ev"}, {"e", logos_sync::eventToJson(ev)}}.dump()), 0);
         pump(200);
         Peer* carol = spawn("carol");
         pump(1300);
@@ -159,14 +167,14 @@ int main(int argc, char** argv) {
     // malformed and hostile frames: dropped and counted, the node keeps working (review C2)
     {
         long badBefore = bob->snap()["counters"]["rxBad"].get<long>();
-        auto inject = [&](const json& f) { bob->bus.onRecv(swamp::CATALOG_TOPIC, "x", FakeLoamBus::b64(f.dump()), 0); };
+        auto inject = [&](const json& f) { bob->bus.onRecv(swamp::categoryTopic("other"), "x", FakeLoamBus::b64(f.dump()), 0); };
         inject(json{{"t", "fp"}, {"from", "zz"}, {"fps", {"a", "b"}}});                  // bounds missing
         inject(json{{"t", "fp"}, {"from", "zz"}, {"fps", {1, 2}}, {"bounds", {3}}});     // wrong types
         inject(json{{"t", "ids"}, {"from", "zz"}, {"ids", "notalist"}});
         inject(json{{"t", "need"}, {"from", "zz"}, {"ids", {{{"x", 1}}}}});
         inject(json{{"t", "ev"}, {"e", "garbage"}});
         inject(json{{"t", "evs"}, {"es", {1, "two", json::object()}}});
-        bob->bus.onRecv(swamp::CATALOG_TOPIC, "x", "!!!not base64 or json", 0);
+        bob->bus.onRecv(swamp::categoryTopic("other"), "x", "!!!not base64 or json", 0);
         pump(300);
         CHECK(bob->snap()["counters"]["rxBad"].get<long>() - badBefore >= 7, "malformed frames are counted, not crashed on");
         CHECK(json::parse(bob->core.listModels("{}"))["total"] == 2, "catalogue intact after hostile frames");
@@ -209,7 +217,40 @@ int main(int argc, char** argv) {
     json s2 = json::parse(again.snapshot());
     CHECK(s2["me"]["address"] == aliceAddr && s2["catalog"]["models"] == 2, "restart keeps identity and catalogue");
 
-        // a node whose 'Connected' event is lost still comes up, by polling loam_core (review M5)
+        // categories (ADR 0014): a node mirrors only the categories it subscribes to
+    {
+        json toy = alice->call(alice->core.publish(json{{"title", "Spinning top"}, {"licence", "CC0-1.0"}, {"category", "toys"}, {"files", {{{"path", stl1}}}}}.dump()));
+        json tool = alice->call(alice->core.publish(json{{"title", "Wrench holder"}, {"licence", "CC0-1.0"}, {"category", "tools"}, {"files", {{{"path", stl2}}}}}.dump()));
+        CHECK(json::parse(alice->core.publish(json{{"title", "x"}, {"licence", "CC0-1.0"}, {"category", "spaceships"}, {"files", {{{"path", stl1}}}}}.dump())).value("ok", true) == false,
+              "an unknown category is refused");
+        CHECK(waitFor([&] { return json::parse(bob->core.listModels(json{{"category", "tools"}}.dump()))["total"] == 1 &&
+                                   json::parse(bob->core.listModels(json{{"category", "toys"}}.dump()))["total"] == 1; }, 5000), "a node subscribed to everything gets both");
+        setenv("SWAMP_CATEGORIES", "tools", 1);
+        Peer* tess = spawn("tess");
+        pump(1300);   // her stored settings/env are read just after onContextReady
+        unsetenv("SWAMP_CATEGORIES");
+        tess->call(tess->core.resync());
+        CHECK(waitFor([&] { return json::parse(tess->core.listModels("{}"))["total"] == 1; }, 8000), "a Tools-only node catches up the Tools model...");
+        pump(1500);
+        json tl = json::parse(tess->core.listModels("{}"));
+        CHECK(tl["total"] == 1 && tl["models"][0]["title"] == "Wrench holder", "...and nothing from other categories");
+        size_t tessEvents = tess->snap()["catalog"]["events"], bobEvents = bob->snap()["catalog"]["events"];
+        CHECK(tessEvents < bobEvents, "the Tools-only node holds a fraction of the catalogue (" + std::to_string(tessEvents) + " of " + std::to_string(bobEvents) + " events)");
+        json subs = json::parse(tess->core.snapshot())["categories"];
+        int n = 0; for (const auto& c : subs) n += c.value("subscribed", false);
+        CHECK(n == 1, "it is subscribed to exactly one category");
+        // publishing in a category subscribes you to it
+        tess->call(tess->core.publish(json{{"title", "Tess's balloon"}, {"licence", "CC0-1.0"}, {"category", "toys"}, {"files", {{{"path", stl1}}}}}.dump()));
+        CHECK(waitFor([&] { return json::parse(tess->core.listModels(json{{"category", "toys"}}.dump()))["total"].get<int>() >= 2; }, 8000),
+              "publishing in Toys subscribed Tess to Toys (she now sees Alice's top too)");
+        CHECK(!json::parse(tess->core.setCategories("[\"nope\"]")).value("ok", true), "setCategories refuses an unknown category");
+        json after = json::parse(tess->core.setCategories("[\"garden\"]"));
+        int toys = 0; for (const auto& c : after["categories"]) if (c["id"] == "toys") toys = c.value("subscribed", false);
+        CHECK(after.value("ok", false) && toys == 1, "categories you publish in stay subscribed");
+        (void)toy; (void)tool;
+    }
+
+    // a node whose 'Connected' event is lost still comes up, by polling loam_core (review M5)
     {
         setenv("SWAMP_CORE_DATA", (root + "/dave/data").c_str(), 1);
         Peer* dave = new Peer(); dave->name = dave->bus.name = dave->store.name = "dave";

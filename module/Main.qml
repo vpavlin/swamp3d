@@ -35,6 +35,7 @@ Item {
     property int total: 0
     property string query: ""
     property string tagFilter: ""
+    property string catFilter: ""     // Browse: one category, or all of yours
     property string sortBy: "new"
     property var model: null          // the open model page
     property string openId: ""
@@ -88,7 +89,7 @@ Item {
         var pending = 2 + (root.openId ? 1 : 0)
         var fin = function () { if (--pending > 0) return; root.busy = false; if (root.again) { root.again = false; root.refresh() } }
         root.core("snapshot", [], function (raw) { var s = root.parse(raw); if (s && s.ok) root.st = s; fin() })
-        root.core("listModels", [JSON.stringify({ q: root.query, tag: root.tagFilter, sort: root.sortBy, mine: root.tab === "mine", limit: 200 })], function (raw) {
+        root.core("listModels", [JSON.stringify({ q: root.query, tag: root.tagFilter, category: root.catFilter, sort: root.sortBy, mine: root.tab === "mine", limit: 200 })], function (raw) {
             var r = root.parse(raw); if (r && r.ok) { root.models = r.models; root.tags = r.tags; root.total = r.total } fin()
         })
         if (root.openId) root.core("getModel", [root.openId], function (raw) { var r = root.parse(raw); if (r && r.ok) root.model = r.model; fin() })
@@ -113,16 +114,21 @@ Item {
     readonly property string viewDir: { var u = String(Qt.resolvedUrl(".")); u = u.indexOf("file://") === 0 ? decodeURIComponent(u.slice(7)) : u; return u.replace(/\/+$/, "") }
     property var imgCache: ({})
     property int imgRev: 0
+    property var imgRetry: ({})
+    Timer { interval: 4000; running: true; repeat: true; onTriggered: root.imgRev++ }   // re-ask for pending pictures
+    function catLabel(id) { var cs = root.st.categories || []; for (var i = 0; i < cs.length; i++) if (cs[i].id === id) return cs[i].label; return id }
     function imageUrl(p) {
         if (!p) return ""
         var sha = String(p).split("/").pop()
         var c = root.imgCache[sha]
-        if (c !== undefined) return c
-        root.imgCache[sha] = ""
+        if (c) return c
+        // pictures are fetched when they're looked at (ADR 0014): ask, then ask again a bit later
+        var now = Date.now()
+        if (c !== undefined && now < (root.imgRetry[sha] || 0)) return ""
+        root.imgCache[sha] = ""; root.imgRetry[sha] = now + 4000
         root.core("cacheImage", [sha, root.viewDir], function (raw) {
             var r = root.parse(raw)
             if (r && r.ok && r.path) { root.imgCache[sha] = "file://" + r.path; root.imgRev++ }
-            else delete root.imgCache[sha]
         })
         return ""
     }
@@ -131,6 +137,7 @@ Item {
     function day(ms) { return ms ? new Date(ms).toISOString().slice(0, 10) : "" }
     function ver() { if (!root.model) return null; var vs = root.model.versions; var i = root.openVersion > 0 ? root.openVersion - 1 : vs.length - 1; return vs[Math.min(i, vs.length - 1)] }
     function openModel(id) { root.openId = id; root.openVersion = 0; root.shownImage = 0; root.model = null; root.refresh() }
+    function presetCategory(id) { var cs = root.st.categories || []; for (var i = 0; i < cs.length; i++) if (cs[i].id === id) { pCategory.currentIndex = i; return } }
     function clearDraft() {
         root.draftFor = ""; root.draftParents = []; root.draftParentInfo = null; root.draftFiles = []; root.draftImages = []; root.draftKeep = []
         pTitle.text = ""; pSummary.text = ""; pDesc.text = ""; pTags.text = ""; pLicence.currentIndex = 0
@@ -140,6 +147,7 @@ Item {
         var info = { modelId: root.model.modelId, v: v.v, title: root.model.title, creatorName: root.model.creatorName, licence: v.licence }
         root.clearDraft()
         root.draftParents = [{ modelId: info.modelId, v: info.v }]; root.draftParentInfo = info
+        root.presetCategory(root.model.category)
         pTitle.text = "Remix of " + info.title; pLicence.currentIndex = Math.max(0, root.licences.indexOf(v.licence))
         root.openId = ""; root.model = null; root.tab = "publish"
     }
@@ -148,6 +156,7 @@ Item {
         var mid = root.model.modelId
         root.clearDraft()
         root.draftFor = mid
+        root.presetCategory(root.model.category)
         root.draftParents = (v.parents || []).map(function (p) { return { modelId: p.modelId, v: p.v } })   // still a remix of the same original
         pTitle.text = v.title; pSummary.text = v.summary || ""; pDesc.text = v.description || ""; pTags.text = (v.tags || []).join(", ")
         pLicence.currentIndex = Math.max(0, root.licences.indexOf(v.licence))
@@ -189,8 +198,8 @@ Item {
     component Thumb: Rectangle {
         property string path: ""
         color: root.cInset; radius: root.rad; clip: true
-        Image { anchors.fill: parent; anchors.margins: 4; source: { root.imgRev; return root.imageUrl(parent.path) } fillMode: Image.PreserveAspectFit; asynchronous: true; visible: status === Image.Ready }
-        T3 { anchors.centerIn: parent; visible: !parent.path; text: "no preview yet" }
+        Image { id: thumbImg; anchors.fill: parent; anchors.margins: 4; source: { root.imgRev; return root.imageUrl(parent.path) } fillMode: Image.PreserveAspectFit; asynchronous: true; visible: status === Image.Ready }
+        T3 { anchors.centerIn: parent; visible: !thumbImg.visible; text: parent.path ? "loading picture..." : "no preview yet" }
     }
 
     FileDialog { id: fileDlg; fileMode: FileDialog.OpenFiles; title: "Model files (STL, 3MF, STEP, ...)"; currentFolder: StandardPaths.writableLocation(StandardPaths.HomeLocation)
@@ -247,6 +256,21 @@ Item {
                     }
                     Flow {
                         Layout.fillWidth: true; spacing: 6
+                        visible: root.tab === "browse"
+                        Repeater {
+                            model: [{ id: "", label: "All my categories" }].concat((root.st.categories || []).filter(function (c) { return c.subscribed && (c.models > 0 || c.id === root.catFilter) }))
+                            delegate: Rectangle {
+                                width: ct.implicitWidth + 20; height: 28; radius: 14
+                                color: root.catFilter === modelData.id ? root.cPrimary : root.cInset; border.color: root.cLine
+                                Text { id: ct; textFormat: Text.PlainText; anchors.centerIn: parent; text: modelData.label + (modelData.models !== undefined ? "  " + modelData.models : ""); color: root.catFilter === modelData.id ? root.cBg : root.cText; font.pixelSize: 12 }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.catFilter = modelData.id; root.refresh() } }
+                            }
+                        }
+                        Text { textFormat: Text.PlainText; text: "choose categories..."; color: root.cPrimary; font.pixelSize: 12; font.underline: true; topPadding: 6
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.tab = "me"; root.refresh() } } }
+                    }
+                    Flow {
+                        Layout.fillWidth: true; spacing: 6
                         visible: root.tags.length > 0
                         Repeater {
                             model: root.tags
@@ -270,9 +294,9 @@ Item {
                                 color: root.cCard; radius: root.rad + 4; border.color: hov.containsMouse ? root.cPrimary : root.cLine
                                 ColumnLayout {
                                     anchors.fill: parent; anchors.margins: root.spS; spacing: 4
-                                    Thumb { Layout.fillWidth: true; Layout.preferredHeight: 190; path: modelData.thumb || "" }
+                                    Thumb { Layout.fillWidth: true; Layout.preferredHeight: 190; path: modelData.thumb || modelData.thumbSha || "" }
                                     T1 { Layout.fillWidth: true; text: modelData.title; font.pixelSize: 14; elide: Text.ElideRight; maximumLineCount: 2 }
-                                    T3 { Layout.fillWidth: true; text: "by " + modelData.creatorName + "  ·  " + modelData.licence + (modelData.remix ? "  ·  remix" : "") + (modelData.retracted ? "  ·  retracted" : "") }
+                                    T3 { Layout.fillWidth: true; text: "by " + modelData.creatorName + "  ·  " + root.catLabel(modelData.category) + "  ·  " + modelData.licence + (modelData.remix ? "  ·  remix" : "") + (modelData.retracted ? "  ·  retracted" : "") }
                                     T3 { Layout.fillWidth: true; text: root.plural(modelData.likes, "like", "likes") + "  ·  " + root.plural(modelData.makes, "make", "makes") + "  ·  v" + modelData.latest }
                                 }
                                 MouseArea { id: hov; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.openModel(modelData.modelId) }
@@ -299,18 +323,18 @@ Item {
                             Layout.fillWidth: true; spacing: root.sp
                             ColumnLayout { Layout.alignment: Qt.AlignTop; spacing: root.spS
                                 Thumb { Layout.preferredWidth: 300; Layout.preferredHeight: 300
-                                    path: { var v = root.ver(); if (!v || !v.images || !v.images.length) return ""; var im = v.images[Math.min(root.shownImage, v.images.length - 1)]; return im.local || "" } }
+                                    path: { var v = root.ver(); if (!v || !v.images || !v.images.length) return ""; var im = v.images[Math.min(root.shownImage, v.images.length - 1)]; return im.local || im.sha256 || "" } }
                                 // every picture of this version: the thumbnail plus the creator's photos
                                 Flow { Layout.preferredWidth: 300; spacing: 6; visible: !!root.ver() && (root.ver().images || []).length > 1
                                     Repeater { model: root.ver() ? (root.ver().images || []) : []
-                                        delegate: Thumb { width: 66; height: 66; path: modelData.local || ""
+                                        delegate: Thumb { width: 66; height: 66; path: modelData.local || modelData.sha256 || ""
                                             border.color: index === root.shownImage ? root.cPrimary : root.cLine
                                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.shownImage = index } } } }
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true; Layout.alignment: Qt.AlignTop; spacing: 6
                                 T1 { Layout.fillWidth: true; font.pixelSize: 20; text: root.model ? root.model.title : "" }
-                                T2 { Layout.fillWidth: true; text: root.model ? ("by " + root.model.creatorName + "  ·  " + (root.ver() ? root.ver().licence : "") + "  ·  published " + root.day(root.ver() ? root.ver().published : 0)) : "" }
+                                T2 { Layout.fillWidth: true; text: root.model ? ("by " + root.model.creatorName + "  ·  " + root.catLabel(root.model.category) + "  ·  " + (root.ver() ? root.ver().licence : "") + "  ·  published " + root.day(root.ver() ? root.ver().published : 0)) : "" }
                                 T2 { Layout.fillWidth: true; visible: !!root.ver() && !!root.ver().summary; text: root.ver() ? (root.ver().summary || "") : "" }
                                 Flow { Layout.fillWidth: true; spacing: 4; visible: !!root.ver() && (root.ver().parents || []).length > 0
                                     T3 { text: "Remix of" }
@@ -373,7 +397,7 @@ Item {
                             model: root.model ? root.model.makesList : []
                             delegate: RowLayout {
                                 Layout.fillWidth: true; spacing: root.sp
-                                Thumb { Layout.preferredWidth: 90; Layout.preferredHeight: 90; path: modelData.images && modelData.images.length && modelData.images[0].local ? modelData.images[0].local : "" }
+                                Thumb { Layout.preferredWidth: 90; Layout.preferredHeight: 90; path: modelData.images && modelData.images.length ? (modelData.images[0].local || modelData.images[0].sha256 || "") : "" }
                                 ColumnLayout { Layout.fillWidth: true
                                     T2 { Layout.fillWidth: true; text: modelData.text || "(photo)" }
                                     T3 { text: modelData.authorName + "  ·  " + root.day(modelData.at) } }
@@ -428,6 +452,10 @@ Item {
                         Area { id: pDesc; placeholderText: "Print settings, assembly, what it's for..." }
                         T3 { text: "Tags" }
                         Field { id: pTags; placeholderText: "comma separated, e.g. tool, organizer, gridfinity" }
+                        T3 { text: "Category" }
+                        ComboBox { id: pCategory; Layout.fillWidth: true; enabled: !root.draftFor
+                            model: (root.st.categories || []).map(function (c) { return c.label })
+                            ToolTip.visible: hovered && !enabled; ToolTip.text: "A model keeps the category it was created in" }
                         T3 { text: "Licence" }
                         ComboBox { id: pLicence; model: root.licences; Layout.fillWidth: true }
                         T3 { text: "Files" }
@@ -452,7 +480,7 @@ Item {
                         LogosButton {
                             text: "Publish"
                             onClicked: {
-                                var d = { title: pTitle.text, summary: pSummary.text, description: pDesc.text, licence: pLicence.currentText,
+                                var d = { title: pTitle.text, summary: pSummary.text, description: pDesc.text, licence: pLicence.currentText, category: ((root.st.categories || [])[pCategory.currentIndex] || { id: "other" }).id,
                                           tags: pTags.text.split(",").map(function (t) { return t.trim() }).filter(function (t) { return t.length > 0 }),
                                           parents: root.draftParents, files: root.draftKeep.map(function (f) { return { sha256: f.sha256, name: f.name } }).concat(root.draftFiles.map(function (p) { return { path: p } })),
                                           images: root.draftImages.map(function (p) { return { path: p } }) }
@@ -484,6 +512,29 @@ Item {
                             T3 { text: "Your key:" }
                             Text { textFormat: Text.PlainText; Layout.fillWidth: true; elide: Text.ElideMiddle; color: root.cText2; font.family: "monospace"; font.pixelSize: 11; text: root.st.me ? root.st.me.address : "" }
                             LogosButton { text: "Copy"; onClicked: root.copy(root.st.me.address, "Address") } }
+                    }
+                    Card {
+                        T1 { text: "Categories you follow" }
+                        T2 { Layout.fillWidth: true; text: "Your node keeps a full copy of these categories: browsing and searching them works offline and nobody learns what you look at. Categories you publish in stay on, so replies to your models reach you." }
+                        Flow { Layout.fillWidth: true; spacing: 6
+                            Repeater { model: root.st.categories || []
+                                delegate: Rectangle {
+                                    width: sc.implicitWidth + 22; height: 30; radius: 15
+                                    color: modelData.subscribed ? root.cPrimary : root.cInset; border.color: root.cLine
+                                    Text { id: sc; textFormat: Text.PlainText; anchors.centerIn: parent; text: (modelData.subscribed ? "✓ " : "") + modelData.label; color: modelData.subscribed ? root.cBg : root.cText; font.pixelSize: 12 }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            var ids = []
+                                            var cs = root.st.categories || []
+                                            for (var i = 0; i < cs.length; i++) {
+                                                var on = cs[i].id === modelData.id ? !cs[i].subscribed : cs[i].subscribed   // flip the clicked one
+                                                if (on) ids.push(cs[i].id)
+                                            }
+                                            root.act("setCategories", [JSON.stringify(ids)], "")
+                                        } } } } }
+                        RowLayout { spacing: root.spS
+                            LogosButton { text: "Follow all"; onClicked: root.act("setCategories", [JSON.stringify(["all"])], "") }
+                            LogosButton { text: "Only mine"; onClicked: root.act("setCategories", [JSON.stringify([])], "") } }
                     }
                     Card {
                         T1 { text: "This node" }

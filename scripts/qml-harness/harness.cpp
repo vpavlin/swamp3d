@@ -42,6 +42,7 @@ public:
         if (m == "postMake") return core->postMake(s(0), s(1));
         if (m == "like") return core->like(s(0), s(1));
         if (m == "setProfile") return core->setProfile(s(0));
+        if (m == "setCategories") return core->setCategories(s(0));
         return "{\"error\":\"Invalid response\"}";
     }
     Q_INVOKABLE void callModuleAsync(const QString& mod, const QString& method, const QVariantList& args, const QJSValue& cb, int) {
@@ -95,13 +96,13 @@ int main(int argc, char** argv) {
     pump(1500);
     friend_->core.setProfile(json{{"name", "Lizard Lab"}}.dump());
     me->core.setProfile(json{{"name", "Swamp Thing"}, {"bio", "I print ducks"}}.dump());
-    auto pub = [&](Peer* p, const char* id, const char* title, const char* summary, json tags, const char* lic) {
-        return json::parse(p->core.publish(json{{"title", title}, {"summary", summary}, {"description", "Printed at 0.2 mm, PLA, no supports.\nScale it as you like."}, {"licence", lic}, {"tags", tags}, {"files", {{{"path", repo + "/bench/data/raw/" + id + ".stl"}}}}}.dump()));
+    auto pub = [&](Peer* p, const char* id, const char* title, const char* summary, json tags, const char* lic, const char* cat) {
+        return json::parse(p->core.publish(json{{"title", title}, {"summary", summary}, {"description", "Printed at 0.2 mm, PLA, no supports.\nScale it as you like."}, {"licence", lic}, {"category", cat}, {"tags", tags}, {"files", {{{"path", repo + "/bench/data/raw/" + id + ".stl"}}}}}.dump()));
     };
-    json a = pub(friend_, "74890", "Geometric bracelet", "faceted, prints flat", {"fashion", "bracelet"}, "CC-BY-4.0");
-    pub(friend_, "80353", "Desk lamp shade", "a lamp head", {"home", "lighting"}, "CC-BY-SA-4.0");
-    pub(friend_, "278455", "Balloon", "party decoration", {"toy", "party"}, "CC0-1.0");
-    pub(me, "168080", "Dashboard wall clock", "clock face with widgets", {"home", "clock"}, "CC-BY-NC-4.0");
+    json a = pub(friend_, "74890", "Geometric bracelet", "faceted, prints flat", {"fashion", "bracelet"}, "CC-BY-4.0", "fashion");
+    pub(friend_, "80353", "Desk lamp shade", "a lamp head", {"home", "lighting"}, "CC-BY-SA-4.0", "household");
+    pub(friend_, "278455", "Balloon", "party decoration", {"toy", "party"}, "CC0-1.0", "toys");
+    pub(me, "168080", "Dashboard wall clock", "clock face with widgets", {"home", "clock"}, "CC-BY-NC-4.0", "household");
     pump(2500);
     std::string mid = a["modelId"];
     me->core.comment(mid, "Printed this in silk PLA, looks great");
@@ -121,6 +122,7 @@ int main(int argc, char** argv) {
     view.show(); pump(2500);
     QQuickItem* r = view.rootObject();
     auto shot = [&](const char* n) { pump(1500); view.grabWindow().save(QString::fromStdString(out + "/swamp-" + n + ".png")); fprintf(stderr, "SHOT %s\n", n); };
+    pump(5000);   // pictures are lazy: the view asks, the core fetches, the view asks again
     shot("browse");
     QMetaObject::invokeMethod(r, "openModel", Q_ARG(QVariant, QString::fromStdString(mid)));
     shot("model");

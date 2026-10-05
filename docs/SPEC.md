@@ -16,8 +16,18 @@ paid models, Android.
 
 ## 2. Transport
 
-- One public catalogue topic: `/swamp/1/catalog/proto`, via `loam_core` (`join`, `sendSealed`,
-  `received`). Frames are JSON, base64-encoded once; receive peels up to three base64 layers.
+- **Topics (ADR 0014, protocol v2):** one topic per category, `/swamp/2/cat/<category>/proto`,
+  and one people topic, `/swamp/2/people/proto` for profiles, via `loam_core`. Each event belongs on
+  exactly one topic, derived from its content (`topicOf`): profiles → people; a model and
+  everything about it (versions, retractions, CIDs, comments, likes, makes) → its category.
+  - A model's category is fixed by its `model.create`; unknown or missing = `other`.
+  - A node subscribes to some categories: it joins their topics and runs catch-up per topic, over
+    that topic's events only.
+  - Publishing in a category subscribes you to it.
+  - A node with no saved choice follows every category (until index snapshots exist, ADR 0015);
+    `SWAMP_CATEGORIES` overrides; a hub follows all.
+  - On a topic it only sends to, a node keeps only events about models it already holds.
+  - Frames are JSON, base64-encoded once; receive peels up to three base64 layers.
 - Frames: `{"t":"ev","e":<event>}` (one event), `{"t":"evs","es":[<event>…]}` (a batch, ≤ 48 KB,
   used when serving catch-up) and loam-sync catch-up frames (`fp` / `ids` / `need`,
   `logos_sync::catchup`), answered by any peer. Every frame from the wire is shape-checked first;
@@ -122,7 +132,8 @@ arguments, no default arguments.
 | `download(modelId, v)` | fetch every file of that version into `~/Swamp/<title>-<modelId8>-v<v>/`; progress via `getModel` |
 | `comment(modelId, text)`, `postMake(modelId, makeJson)`, `like(modelId, on)` | community events |
 | `setProfile(profileJson)` | `{name, bio}` |
-| `cacheImage(sha, viewDir)` | copy a picture the node holds (a listed thumbnail or photo) into `<viewDir>/cache/` and return its path. Basecamp 0.3 sandboxes views: a view may load only `qrc:` and files under its own plugin dir — no `file://` elsewhere, no `data:` URLs. `viewDir` must be a directory named `swamp`; the cache keeps ≤ 300 files |
+| `setCategories(listJson)` | the categories to follow: `["tools","toys"]` or `["all"]`; categories you publish in always stay. `snapshot().categories` lists `{id, label, subscribed, models}` |
+| `cacheImage(sha, viewDir)` | pictures are fetched lazily: if the node doesn't hold it yet, this returns `{ok:false, pending:true}` and fetches it (ask again in a few seconds). Otherwise: copy a picture the node holds (a listed thumbnail or photo) into `<viewDir>/cache/` and return its path. Basecamp 0.3 sandboxes views: a view may load only `qrc:` and files under its own plugin dir — no `file://` elsewhere, no `data:` URLs. `viewDir` must be a directory named `swamp`; the cache keeps ≤ 300 files |
 | `retract(modelId, reason)` | creator only |
 | `resync()` | catch-up now |
 

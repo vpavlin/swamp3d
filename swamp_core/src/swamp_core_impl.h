@@ -44,6 +44,8 @@ public:
     std::string postMake(std::string modelId, std::string makeJson);
     std::string like(std::string modelId, std::string on);
     std::string setProfile(std::string profileJson);
+    // categories this node mirrors (ADR 0014): a JSON array of category ids, or ["all"]
+    std::string setCategories(std::string listJson);
 
 protected:
     void onContextReady() override;
@@ -78,11 +80,21 @@ private:
     void startModules();
     void startTransport();
     void onStatus(const std::string& s);
-    void sendFrame(const swamp::json& frame);
+    void sendFrame(const std::string& topic, const swamp::json& frame);
     void onFrame(const std::string& topic, const std::string& payloadB64, int64_t sentAt);
-    void handleFrame(const swamp::json& f, bool live);
-    void serveEvents(const std::vector<swamp::Event>& evs);
+    void handleFrame(const std::string& topic, const swamp::json& f, bool live);
+    void serveEvents(const std::string& topic, const std::vector<swamp::Event>& evs);
     void catchupRound();
+    void catchupOn(const std::string& topic);
+    std::vector<std::string> subscribedTopics() const;
+    bool isSubscribedTopic(const std::string& topic) const;
+    void ensureJoined(const std::string& topic);
+    void subscribe(const std::string& cat);
+    std::vector<swamp::Event> eventsOn(const std::string& topic);
+    void loadSettings();
+    long long imageSize(const std::string& sha);
+    swamp::json categoriesJson();
+    void saveSettings();
 
     // storage (host-owned node)
     void ensureStorage();
@@ -124,6 +136,8 @@ private:
     std::map<std::string, Fetch> m_fetch;
     std::map<std::string, DownloadJob> m_jobs;
     std::map<std::string, std::string> m_myCids, m_toAnnounce;
+    std::set<std::string> m_subs, m_joined;
+    std::map<std::string, long long> m_wantImg;
     std::map<std::string, long long> m_announcedAt, m_answeredAt;
     QTimer* m_timer = nullptr;
     // one Storage request at a time: storage 3.x serves calls in turn and a download start can

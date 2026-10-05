@@ -17,7 +17,26 @@ namespace swamp {
 using json = nlohmann::json;
 using logos_sync::Event;
 inline const std::string DOMAIN = "swamp";
-inline const std::string CATALOG_TOPIC = "/swamp/1/catalog/proto";
+// Topics (ADR 0014). Nobody mirrors the whole catalogue: a model and everything about it lives on
+// its category's topic; profiles live on one small people topic.
+inline const std::string PEOPLE_TOPIC = "/swamp/2/people/proto";
+inline std::string categoryTopic(const std::string& cat) { return "/swamp/2/cat/" + cat + "/proto"; }
+// The category list is part of the protocol: adding one is an app update. "other" catches the rest.
+inline const std::vector<std::pair<std::string, std::string>>& categories() {
+    static const std::vector<std::pair<std::string, std::string>> C = {
+        {"household", "Household"}, {"kitchen", "Kitchen"}, {"organizers", "Storage & organizers"},
+        {"tools", "Tools"}, {"workshop", "Workshop & jigs"}, {"parts", "Parts & repair"},
+        {"electronics", "Electronics & enclosures"}, {"printer", "3D printer parts"}, {"toys", "Toys"},
+        {"games", "Games & puzzles"}, {"art", "Art & sculpture"}, {"fashion", "Fashion & jewelry"},
+        {"cosplay", "Costume & cosplay"}, {"hobby", "Hobby & RC"}, {"garden", "Garden & outdoor"},
+        {"education", "Education & science"}, {"accessibility", "Medical & accessibility"},
+        {"office", "Office & desk"}, {"other", "Other"}};
+    return C;
+}
+inline bool knownCategory(const std::string& c) {
+    for (const auto& [id, label] : categories()) if (id == c) return true;
+    return false;
+}
 constexpr size_t MAX_PAYLOAD = 16 * 1024;
 
 inline std::string sha256Hex(const std::string& data) {
@@ -119,7 +138,7 @@ inline std::string validateVersion(const json& p) {
 
 // ── folded state ────────────────────────────────────────────────────────────────────────────
 struct Model {
-    std::string modelId, creator;
+    std::string modelId, creator, category = "other";
     long long created = 0;
     std::vector<json> versions;   // index v-1
     bool retracted = false;
@@ -132,7 +151,8 @@ struct Catalog {
     std::map<std::string, Model> models;
     std::map<std::string, json> profiles;        // author -> {name, bio}
     std::map<std::string, std::vector<std::string>> cids;   // sha256 -> candidate CIDs, best first
-    std::map<std::string, std::string> owner;                // sha256 -> creator of the first model listing it
+    std::map<std::string, std::string> owner;
+    std::map<std::string, std::string> blobModel;               // sha256 -> first model listing it (topic routing)                // sha256 -> creator of the first model listing it
     size_t events = 0, rejected = 0;
 };
 
@@ -177,6 +197,8 @@ inline Catalog fold(const std::vector<Event>& log, bool admitted = false) {
             std::string id = str(p, "modelId"), nonce = str(p, "nonce");
             if (!isHex(id, 32) || nonce.empty() || nonce.size() > 64 || modelIdFor(who, nonce) != id || c.models.count(id)) { c.rejected++; continue; }
             Model m; m.modelId = id; m.creator = who; m.created = t; m.lastActivity = t;
+            std::string cat = str(p, "category");
+            if (knownCategory(cat)) m.category = cat;   // missing/unknown (e.g. an M1 model) = "other"
             c.models[id] = m;
         } else if (e.type == "model.version") {
             Model* m = model(str(p, "modelId"));
@@ -184,8 +206,8 @@ inline Catalog fold(const std::vector<Event>& log, bool admitted = false) {
             json v = p; v["published"] = t; v["author"] = who;
             m->versions.push_back(v);
             m->lastActivity = std::max(m->lastActivity, t);
-            for (const char* k : {"files", "images"}) for (const auto& f : arr(p, k)) c.owner.emplace(str(f, "sha256"), who);
-            if (p.contains("fp") && p["fp"].is_object()) c.owner.emplace(str(p["fp"], "sha256"), who);
+            for (const char* k : {"files", "images"}) for (const auto& f : arr(p, k)) { c.owner.emplace(str(f, "sha256"), who); c.blobModel.emplace(str(f, "sha256"), m->modelId); }
+            if (p.contains("fp") && p["fp"].is_object()) { c.owner.emplace(str(p["fp"], "sha256"), who); c.blobModel.emplace(str(p["fp"], "sha256"), m->modelId); }
         } else if (e.type == "model.retract") {
             Model* m = model(str(p, "modelId"));
             if (!m || m->creator != who) { c.rejected++; continue; }
@@ -282,6 +304,21 @@ inline Event makeEvent(Identity& id, const std::string& type, const json& payloa
     logos_sync::SoftwareSigner s(id.priv);
     logos_sync::signEvent(s, DOMAIN, e);
     return e;
+}
+
+// Which topic an event belongs on, from its content (empty = not known yet: its model hasn't
+// arrived). Catch-up on a topic runs over exactly the events that map to it.
+inline std::string topicOf(const Event& e, const Catalog& c) {
+    if (e.type == "profile.put") return PEOPLE_TOPIC;
+    const json& p = e.payload;
+    if (e.type == "model.create") { std::string cat = str(p, "category"); return categoryTopic(knownCategory(cat) ? cat : "other"); }
+    std::string mid = str(p, "modelId");
+    if (mid.empty() && e.type == "blob.cids" && p.contains("cids") && p["cids"].is_object() && !p["cids"].empty()) {
+        auto bm = c.blobModel.find(p["cids"].begin().key());
+        if (bm != c.blobModel.end()) mid = bm->second;
+    }
+    auto m = c.models.find(mid);
+    return m == c.models.end() ? std::string() : categoryTopic(m->second.category);
 }
 
 } // namespace swamp

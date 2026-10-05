@@ -20,7 +20,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.1.4";
+static const char* SWAMP_VERSION = "0.2.0";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -41,6 +41,7 @@ static constexpr long long kAnnounceHoldMs = 10000;
 static constexpr int kMaxFetches = 6;
 static constexpr int kPreviewFetches = 2;
 static constexpr long long kPreviewMaxBytes = 2 * 1024 * 1024;
+static constexpr long long kWantImgMs = 10 * 60 * 1000;    // a picture stays wanted this long after the view asked
 static constexpr int kHubConcurrency = 3;
 static constexpr long long kImageMaxBytes = 16 * 1024 * 1024;
 static constexpr size_t kImageCacheFiles = 300;
@@ -169,7 +170,39 @@ std::string SwampCoreImpl::storeBlob(const std::string& bytes) {
     return sha;
 }
 
+// Which categories this node mirrors. Until index snapshots (ADR 0015) give global search, a node
+// with no saved choice mirrors everything; SWAMP_CATEGORIES ("all" or a comma list) overrides; a
+// hub always mirrors everything.
+void SwampCoreImpl::loadSettings() {
+    m_subs.clear();
+    std::string s;
+    json st = readFile(m_dataDir + "/settings.json", s) ? json::parse(s, nullptr, false) : json();
+    std::vector<std::string> want;
+    bool all = !st.is_object() || !st.contains("categories");
+    if (st.is_object()) for (const auto& c : arr(st, "categories")) if (c.is_string()) want.push_back(c.get<std::string>());
+    if (const char* env = getenv("SWAMP_CATEGORIES")) {
+        std::string e = env; want.clear(); all = (e == "all");
+        for (size_t i = 0; !all && i <= e.size();) { size_t j = e.find(',', i); if (j == std::string::npos) j = e.size(); if (j > i) want.push_back(e.substr(i, j - i)); i = j + 1; }
+    }
+    if (m_hub) all = true;
+    for (const auto& [id, label] : categories()) if (all || std::find(want.begin(), want.end(), id) != want.end()) m_subs.insert(id);
+}
+void SwampCoreImpl::saveSettings() {
+    json c = json::array();
+    for (const auto& id : m_subs) c.push_back(id);
+    writeFile(m_dataDir + "/settings.json", json{{"categories", c}}.dump());
+}
+json SwampCoreImpl::categoriesJson() {
+    std::map<std::string, int> count;
+    for (const auto& [id, m] : m_cat.models) if (!m.versions.empty() && !m.retracted) count[m.category]++;
+    json a = json::array();
+    for (const auto& [id, label] : categories())
+        a.push_back({{"id", id}, {"label", label}, {"subscribed", m_subs.count(id) > 0}, {"models", count[id]}});
+    return a;
+}
+
 void SwampCoreImpl::loadAll() {
+    loadSettings();
     std::string s;
     json id = readFile(m_dataDir + "/identity.json", s) ? json::parse(s, nullptr, false) : json();
     logos_sync::Bytes priv;
@@ -245,7 +278,10 @@ Event SwampCoreImpl::author(const std::string& type, const json& payload) {
     ingest(e);
     refold();
     saveLog();
-    sendFrame(json{{"t", "ev"}, {"e", logos_sync::eventToJson(e)}});
+    std::string topic = topicOf(e, m_cat);
+    // publishing into a category makes you part of it: replies to your models reach you
+    if (e.type == "model.create" && topic != PEOPLE_TOPIC) subscribe(str(payload, "category").empty() ? "other" : str(payload, "category"));
+    sendFrame(topic, json{{"t", "ev"}, {"e", logos_sync::eventToJson(e)}});
     return e;
 }
 std::string SwampCoreImpl::nameOf(const std::string& address) {
@@ -274,8 +310,10 @@ std::set<std::string> SwampCoreImpl::myBlobs() {
 json SwampCoreImpl::card(const Model& m) {
     const json& v = m.versions.back();
     json thumb = nullptr;
+    std::string thumbSha;
     if (v.contains("images")) for (const auto& im : v["images"]) {
         std::string sha = im.value("sha256", "");
+        if (thumbSha.empty()) thumbSha = sha;
         if (haveBlob(sha)) { thumb = blobPath(sha); break; }
     }
     int made = (int)m.makes.size();
@@ -285,14 +323,46 @@ json SwampCoreImpl::card(const Model& m) {
                 {"likes", likeCount(m)}, {"makes", made}, {"comments", m.comments.size()},
                 {"published", v.value("published", 0LL)}, {"created", m.created}, {"thumb", thumb},
                 {"mine", m.creator == m_id.address}, {"retracted", m.retracted},
-                {"remix", v.contains("parents") && !v["parents"].empty()}};
+                {"remix", v.contains("parents") && !v["parents"].empty()},
+                {"thumbSha", thumbSha}, {"category", m.category}};
 }
 
 // ---- transport ------------------------------------------------------------------------------
-void SwampCoreImpl::sendFrame(const json& frame) {
-    if (!m_ready) return;   // catch-up delivers anything we authored offline
+// ---- topics (ADR 0014) ------------------------------------------------------------------------
+std::vector<std::string> SwampCoreImpl::subscribedTopics() const {
+    std::vector<std::string> t{PEOPLE_TOPIC};
+    for (const auto& c : m_subs) t.push_back(categoryTopic(c));
+    return t;
+}
+bool SwampCoreImpl::isSubscribedTopic(const std::string& topic) const {
+    if (topic == PEOPLE_TOPIC) return true;
+    for (const auto& c : m_subs) if (categoryTopic(c) == topic) return true;
+    return false;
+}
+void SwampCoreImpl::ensureJoined(const std::string& topic) {
+    if (topic.empty() || !m_ready || m_joined.count(topic)) return;
+    m_joined.insert(topic);
+    try { modules().loam_core.joinAsync(topic, [](std::string) {}); } catch (...) {}
+}
+void SwampCoreImpl::subscribe(const std::string& cat) {
+    if (!knownCategory(cat) || m_subs.count(cat)) return;
+    m_subs.insert(cat);
+    saveSettings();
+    ensureJoined(categoryTopic(cat));
+    if (m_ready) catchupOn(categoryTopic(cat));
+}
+// The events that belong on a topic - what catch-up on that topic compares and serves.
+std::vector<Event> SwampCoreImpl::eventsOn(const std::string& topic) {
+    std::vector<Event> out;
+    for (const auto& e : m_log) if (topicOf(e, m_cat) == topic) out.push_back(e);
+    return out;
+}
+
+void SwampCoreImpl::sendFrame(const std::string& topic, const json& frame) {
+    if (!m_ready || topic.empty()) return;   // catch-up delivers anything we authored offline
+    ensureJoined(topic);
     m_tx++;
-    try { modules().loam_core.sendSealedAsync(CATALOG_TOPIC, b64std(frame.dump()), [](std::string) {}); }
+    try { modules().loam_core.sendSealedAsync(topic, b64std(frame.dump()), [](std::string) {}); }
     catch (const std::exception& e) { fprintf(stderr, "[swamp] send failed: %s\n", e.what()); }
 }
 
@@ -324,8 +394,8 @@ static long long toMs(int64_t t) {
 }
 
 void SwampCoreImpl::onFrame(const std::string& topic, const std::string& payloadB64, int64_t sentAt) {
-    if (topic != CATALOG_TOPIC) return;
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_joined.count(topic)) return;
     m_rx++;
     if (payloadB64.size() > 512 * 1024) { m_rxBad++; return; }
     std::string s = payloadB64, dec;
@@ -339,47 +409,52 @@ void SwampCoreImpl::onFrame(const std::string& topic, const std::string& payload
     if (!f.is_object()) { m_rxBad++; return; }
     long long at = toMs(sentAt);
     bool live = at == 0 || nowMs() - at < kCatchupMaxAgeMs;
-    try { handleFrame(f, live); }
+    try { handleFrame(topic, f, live); }
     catch (const std::exception& e) { m_rxBad++; fprintf(stderr, "[swamp] bad frame dropped: %s\n", e.what()); }
 }
 
-void SwampCoreImpl::handleFrame(const json& f, bool live) {
+void SwampCoreImpl::handleFrame(const std::string& topic, const json& f, bool live) {
     const std::string t = str(f, "t");
+    bool subscribed = isSubscribedTopic(topic);
     if (t == "ev" || t == "evs") {
         json list = t == "ev" ? json::array({f.value("e", json())}) : f.value("es", json::array());
         if (!list.is_array()) { m_rxBad++; return; }
         for (const auto& j : list) {
             Event e;
             if (!eventFrom(j, e)) { m_rxBad++; continue; }
+            // on a topic we only send to (a model we opened, outside our categories), keep what's
+            // about models we already hold - not the whole category
+            if (!subscribed && (e.type == "model.create" || !m_cat.models.count(str(e.payload, "modelId")))) continue;
             if (ingest(e)) m_rxEvents++;
         }
     } else if (wellFormedCatchup(f)) {
+        if (!subscribed) return;   // we don't hold that topic's set: answering would be wrong
         // Store replays old catch-up requests on every (re)connect: answering them is pure cost.
         // Events always count, whatever their age.
         if (!live) { m_staleCatchup++; return; }
         // A peer's opening fp gets one answer per kAnswerEveryMs; its follow-ups (ids/need) always do.
-        const std::string from = str(f, "from");
+        const std::string from = topic + "|" + str(f, "from");
         long long now = nowMs();
         if (str(f, "t") == "fp" && !f.contains("lo") && !f.contains("hi")) {
             auto a = m_answeredAt.find(from);
             if (a != m_answeredAt.end() && now - a->second < kAnswerEveryMs) { m_throttled++; return; }
             m_answeredAt[from] = now;
         }
-        auto step = logos_sync::catchup::respond(m_log, f, m_id.address);
-        for (const auto& r : step.replies) sendFrame(r);
-        serveEvents(step.serve);
+        auto step = logos_sync::catchup::respond(eventsOn(topic), f, m_id.address);
+        for (const auto& r : step.replies) sendFrame(topic, r);
+        serveEvents(topic, step.serve);
     } else m_rxBad++;
 }
 
 // Serve what a peer asked for in batches, within a budget: every node answering every request at
 // full speed would flood the topic (and spend the RLN allowance). Anything cut off is asked
 // for again in the peer's next catch-up round.
-void SwampCoreImpl::serveEvents(const std::vector<Event>& evs) {
+void SwampCoreImpl::serveEvents(const std::string& topic, const std::vector<Event>& evs) {
     long long now = nowMs();
     if (now - m_serveWindow > kServeWindowMs) { m_serveWindow = now; m_servedInWindow = 0; }
     json batch = json::array();
     size_t bytes = 0;
-    auto flush = [&] { if (!batch.empty()) sendFrame(json{{"t", "evs"}, {"es", batch}}); batch = json::array(); bytes = 0; };
+    auto flush = [&] { if (!batch.empty()) sendFrame(topic, json{{"t", "evs"}, {"es", batch}}); batch = json::array(); bytes = 0; };
     for (const auto& e : evs) {
         if (m_servedInWindow >= kServePerWindow) { m_throttled += 1; continue; }
         json j = logos_sync::eventToJson(e);
@@ -393,9 +468,12 @@ void SwampCoreImpl::serveEvents(const std::vector<Event>& evs) {
     flush();
 }
 
+void SwampCoreImpl::catchupOn(const std::string& topic) {
+    sendFrame(topic, logos_sync::catchup::buildInitial(eventsOn(topic), m_id.address));
+}
 void SwampCoreImpl::catchupRound() {
     m_lastCatchup = nowMs();
-    sendFrame(logos_sync::catchup::buildInitial(m_log, m_id.address));
+    for (const auto& t : subscribedTopics()) catchupOn(t);
 }
 
 // loam_core reports "Connected" by event; the event can arrive before we subscribed or get lost,
@@ -405,7 +483,7 @@ void SwampCoreImpl::onStatus(const std::string& s) {
     m_status = s;
     if (s == "Connected" && !m_ready) {
         m_ready = true;
-        try { modules().loam_core.joinAsync(CATALOG_TOPIC, [](std::string) {}); } catch (...) {}
+        for (const auto& t : subscribedTopics()) ensureJoined(t);
         for (int ms : {3000, 10000, 25000}) QTimer::singleShot(ms, m_timer, [this] { std::lock_guard<std::recursive_mutex> l(m_mtx); catchupRound(); });
     } else if (s == "Connected") {
         catchupRound();
@@ -567,13 +645,22 @@ void SwampCoreImpl::flushAnnouncements() {
     if (!m_announceHeldSince) m_announceHeldSince = now;
     if (more && now - m_announceHeldSince < kAnnounceHoldMs) return;
     m_announceHeldSince = 0;
-    while (!m_toAnnounce.empty()) {
-        json m = json::object();
-        for (auto it = m_toAnnounce.begin(); it != m_toAnnounce.end() && m.size() < kCidsPerEvent;) {
-            m[it->first] = it->second;
-            m_announcedAt[it->first] = now;
-            it = m_toAnnounce.erase(it);
-        }
+    // one event per topic: a blob.cids event is routed by the model of its first file
+    std::map<std::string, json> byModel;
+    for (const auto& [sha, cid] : m_toAnnounce) {
+        auto bm = m_cat.blobModel.find(sha);
+        std::string mid = bm == m_cat.blobModel.end() ? "" : bm->second;
+        auto mi = m_cat.models.find(mid);
+        std::string topic = mi == m_cat.models.end() ? "" : categoryTopic(mi->second.category);
+        if (topic.empty()) continue;   // its model isn't folded yet: next tick
+        json& m = byModel[topic];
+        if (m.is_null()) m = json::object();
+        if (m.size() >= kCidsPerEvent) continue;
+        m[sha] = cid;
+        m_announcedAt[sha] = now;
+    }
+    for (auto& [topic, m] : byModel) {
+        for (auto it = m.begin(); it != m.end(); ++it) m_toAnnounce.erase(it.key());
         author("blob.cids", json{{"cids", m}});
     }
     publishState();
@@ -771,23 +858,31 @@ void SwampCoreImpl::advanceJobs() {
 }
 
 // Thumbnails and photos are small: fetch them eagerly so listings have pictures.
+// The size a listed picture (a version image or a make photo) declares; 0 = not a picture we know.
+long long SwampCoreImpl::imageSize(const std::string& sha) {
+    for (const auto& [id, m] : m_cat.models) {
+        for (const auto& v : m.versions) for (const auto& im : arr(v, "images")) if (str(im, "sha256") == sha) return num(im, "size");
+        for (const auto& mk : m.makes) for (const auto& im : arr(mk, "images")) if (str(im, "sha256") == sha) return num(im, "size");
+    }
+    return 0;
+}
+
+// Pictures the view asked for in the last few minutes (cacheImage), small ones only.
 void SwampCoreImpl::fetchPreviews() {
     int inflight = 0;
     for (const auto& [s, f] : m_fetch) inflight += f.inflight;
-    for (const auto& [id, m] : m_cat.models) {
-        if (m.versions.empty() || m.retracted) continue;
-        const json& v = m.versions.back();
-        if (!v.contains("images")) continue;
-        for (const auto& im : v["images"]) {
-            if (inflight >= kPreviewFetches) return;
-            std::string sha = im.value("sha256", "");
-            long long size = im.value("size", 0LL);
-            if (size > kPreviewMaxBytes || haveBlob(sha) || !m_cat.cids.count(sha)) continue;
-            auto fi = m_fetch.find(sha);
-            if (fi != m_fetch.end() && (fi->second.inflight || nowMs() < fi->second.nextTry)) continue;
-            startFetch(sha, size);
-            if (m_fetch.count(sha) && m_fetch[sha].inflight) inflight++;
-        }
+    long long now = nowMs();
+    for (auto it = m_wantImg.begin(); it != m_wantImg.end();) {
+        const std::string sha = it->first;
+        if (now - it->second > kWantImgMs || haveBlob(sha)) { it = m_wantImg.erase(it); continue; }
+        ++it;
+        if (inflight >= kPreviewFetches) continue;
+        long long size = imageSize(sha);
+        if (size <= 0 || size > kPreviewMaxBytes || !m_cat.cids.count(sha)) continue;
+        auto fi = m_fetch.find(sha);
+        if (fi != m_fetch.end() && (fi->second.inflight || now < fi->second.nextTry)) continue;
+        startFetch(sha, size);
+        if (m_fetch.count(sha) && m_fetch[sha].inflight) inflight++;
     }
 }
 
@@ -876,6 +971,7 @@ std::string SwampCoreImpl::snapshot() {
     for (const auto& [s, f] : m_fetch) inflight += f.inflight;
     return json{{"ok", true}, {"version", SWAMP_VERSION}, {"status", m_status}, {"hub", m_hub},
                 {"me", {{"address", m_id.address}, {"profile", profile}}},
+                {"categories", categoriesJson()},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
                 {"catalog", {{"events", m_log.size()}, {"models", visible}, {"rejected", m_cat.rejected}, {"cids", m_cat.cids.size()}}},
                 {"counters", {{"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
@@ -893,6 +989,7 @@ std::string SwampCoreImpl::listModels(std::string queryJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json q = parseArg(queryJson);
     if (!q.is_object()) q = json::object();
+    std::string catFilter = str(q, "category");
     std::string text = str(q, "q"), tag = str(q, "tag"), sort = (str(q, "sort").empty() ? std::string("new") : str(q, "sort"));
     bool mineOnly = flag(q, "mine");
     size_t limit = (size_t)std::max(1, std::min(500, (int)std::max(-1000LL, std::min(1000LL, num(q, "limit", 100)))));
@@ -901,6 +998,7 @@ std::string SwampCoreImpl::listModels(std::string queryJson) {
         if (m.versions.empty()) continue;
         if (mineOnly && m.creator != m_id.address) continue;
         if (m.retracted && !mineOnly) continue;   // your own retracted models stay visible to you
+        if (!catFilter.empty() && m.category != catFilter) continue;
         if (matches(m, text, tag)) hits.push_back(&m);
     }
     std::sort(hits.begin(), hits.end(), [&](const Model* a, const Model* b) {
@@ -994,18 +1092,17 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
 std::string SwampCoreImpl::cacheImage(std::string sha, std::string viewDir) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     sha = unquote(sha); viewDir = unquote(viewDir);
-    if (!isHex(sha, 64) || !haveBlob(sha)) return fail("Not on this device yet");
+    if (!isHex(sha, 64)) return fail("Not a picture id");
     while (viewDir.size() > 1 && viewDir.back() == '/') viewDir.pop_back();
     std::error_code ec;
     if (viewDir.empty() || viewDir[0] != '/' || viewDir.find("..") != std::string::npos ||
         fs::path(viewDir).filename() != "swamp" || !fs::is_directory(viewDir, ec)) return fail("Not the Swamp view's directory");
-    bool listed = false;
-    for (const auto& [id, m] : m_cat.models) {
-        for (const auto& v : m.versions) for (const auto& im : arr(v, "images")) if (str(im, "sha256") == sha) listed = true;
-        for (const auto& mk : m.makes) for (const auto& im : arr(mk, "images")) if (str(im, "sha256") == sha) listed = true;
-        if (listed) break;
+    if (imageSize(sha) <= 0) return fail("Not a picture in the catalogue");
+    if (!haveBlob(sha)) {
+        // pictures are fetched when someone looks at them, not for the whole catalogue (ADR 0014)
+        m_wantImg[sha] = nowMs();
+        return json{{"ok", false}, {"pending", true}, {"error", "Fetching the picture"}}.dump();
     }
-    if (!listed) return fail("Not a picture in the catalogue");
     if ((long long)fs::file_size(blobPath(sha), ec) > kImageMaxBytes) return fail("Picture too large to show");
     std::string head;
     { std::ifstream f(blobPath(sha), std::ios::binary); head.resize(16); f.read(head.data(), 16); head.resize((size_t)std::max<std::streamsize>(0, f.gcount())); }
@@ -1037,6 +1134,10 @@ std::string SwampCoreImpl::publish(std::string draftJson) {
     if (!d.is_object()) return fail("The draft is not valid JSON");
     if (!d.contains("files") || !d["files"].is_array() || d["files"].empty()) return fail("Add at least one file");
     std::string modelId = str(d, "modelId");
+    // a model lives in one category, fixed when it's created (its topic, ADR 0014)
+    std::string category = str(d, "category");
+    if (category.empty()) category = "other";
+    if (!knownCategory(category)) return fail("Pick a category");
     const Model* existing = nullptr;
     if (!modelId.empty()) {
         auto it = m_cat.models.find(modelId);
@@ -1103,7 +1204,7 @@ std::string SwampCoreImpl::publish(std::string draftJson) {
     if (!why.empty()) return fail(why);
     if (ver.dump().size() > MAX_PAYLOAD) return fail("The description and metadata are too long");
     // only now, with a version known to be valid, does the model come into existence
-    if (!nonce.empty()) author("model.create", json{{"modelId", modelId}, {"nonce", nonce}, {"title", str(d, "title")}});
+    if (!nonce.empty()) author("model.create", json{{"modelId", modelId}, {"nonce", nonce}, {"title", str(d, "title")}, {"category", category}});
     author("model.version", ver);
     // uploads start from tick() (retryUploads), never on this IPC call; CIDs are announced in batches
     publishState();
@@ -1200,4 +1301,27 @@ std::string SwampCoreImpl::setProfile(std::string profileJson) {
     if (name.empty() || name.size() > 60) return fail("Pick a display name (1-60 characters)");
     author("profile.put", json{{"name", name}, {"bio", str(p, "bio")}});
     return ok();
+}
+
+std::string SwampCoreImpl::setCategories(std::string listJson) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
+    json a = parseArg(listJson);
+    if (!a.is_array()) return fail("Expected a list of categories");
+    std::set<std::string> want;
+    for (const auto& c : a) {
+        if (!c.is_string()) continue;
+        if (c.get<std::string>() == "all") { for (const auto& [id, label] : categories()) want.insert(id); continue; }
+        if (!knownCategory(c.get<std::string>())) return fail("Unknown category: " + c.get<std::string>());
+        want.insert(c.get<std::string>());
+    }
+    // categories you publish in stay: comments on your models have to reach you
+    for (const auto& [id, m] : m_cat.models) if (m.creator == m_id.address) want.insert(m.category);
+    std::set<std::string> added;
+    for (const auto& c : want) if (!m_subs.count(c)) added.insert(c);
+    m_subs = want;
+    saveSettings();
+    for (const auto& c : added) { ensureJoined(categoryTopic(c)); if (m_ready) catchupOn(categoryTopic(c)); }
+    publishState();
+    return ok(json{{"categories", categoriesJson()}});
 }
