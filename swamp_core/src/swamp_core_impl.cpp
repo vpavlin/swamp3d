@@ -20,7 +20,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.1.2";
+static const char* SWAMP_VERSION = "0.1.4";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -898,8 +898,9 @@ std::string SwampCoreImpl::listModels(std::string queryJson) {
     size_t limit = (size_t)std::max(1, std::min(500, (int)std::max(-1000LL, std::min(1000LL, num(q, "limit", 100)))));
     std::vector<const Model*> hits;
     for (const auto& [id, m] : m_cat.models) {
-        if (m.versions.empty() || m.retracted) continue;
+        if (m.versions.empty()) continue;
         if (mineOnly && m.creator != m_id.address) continue;
+        if (m.retracted && !mineOnly) continue;   // your own retracted models stay visible to you
         if (matches(m, text, tag)) hits.push_back(&m);
     }
     std::sort(hits.begin(), hits.end(), [&](const Model* a, const Model* b) {
@@ -941,6 +942,20 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
             }
         }
         vv.erase("fp");
+        // parents with what the view needs to link them
+        if (vv.contains("parents") && vv["parents"].is_array())
+            for (auto& p : vv["parents"]) {
+                auto pm = m_cat.models.find(str(p, "modelId"));
+                if (pm != m_cat.models.end() && !pm->second.versions.empty()) {
+                    p["title"] = pm->second.versions.back().value("title", "");
+                    p["creatorName"] = nameOf(pm->second.creator);
+                    int pv = (int)num(p, "v", 0);
+                    if (pv >= 1 && pv <= (int)pm->second.versions.size()) {   // the version that was remixed, not the latest
+                        p["title"] = pm->second.versions[pv - 1].value("title", "");
+                        p["licence"] = pm->second.versions[pv - 1].value("licence", "");
+                    }
+                }
+            }
         std::string key = modelId + "@" + std::to_string(v.value("v", 0));
         auto jt = m_jobs.find(key);
         if (jt != m_jobs.end()) vv["download"] = {{"status", jt->second.status}, {"dir", jt->second.dir}, {"error", jt->second.error}};
@@ -1034,9 +1049,15 @@ std::string SwampCoreImpl::publish(std::string draftJson) {
     std::vector<double> firstMesh;
     for (const auto& f : d["files"]) {
         if (!f.is_object()) return fail("Each file needs a path");
-        std::string path = str(f, "path"), bytes;
-        if (!readFile(path, bytes) || bytes.empty()) return fail("Can't read " + path);
-        std::string name = fs::path(path).filename().string();
+        std::string path = str(f, "path"), bytes, name;
+        if (path.empty() && isHex(str(f, "sha256"), 64)) {
+            // a file this node already holds (carried over from an earlier version)
+            if (!haveBlob(str(f, "sha256")) || !readFile(blobPath(str(f, "sha256")), bytes)) return fail("A file from the previous version isn't on this device any more - add it again");
+            name = str(f, "name");
+        } else {
+            if (!readFile(path, bytes) || bytes.empty()) return fail("Can't read " + path);
+            name = fs::path(path).filename().string();
+        }
         if (!safeName(name)) return fail("Unsupported file name: " + name);
         std::string sha = storeBlob(bytes);
         std::string kind = str(f, "kind");

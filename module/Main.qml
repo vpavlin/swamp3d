@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import QtCore
 import Logos.Theme
 import Logos.Controls
 
@@ -44,6 +45,9 @@ Item {
     property string draftFor: ""      // modelId when publishing a new version
     property var draftFiles: []
     property var draftImages: []
+    property var draftKeep: []        // files carried over from the previous version: {sha256, name, size}
+    property var draftParentInfo: null // the version being remixed: {modelId, v, title, creatorName, licence}
+    property int shownImage: 0        // which picture of the open version is large
 
     readonly property var licences: ["CC-BY-4.0", "CC-BY-SA-4.0", "CC-BY-NC-4.0", "CC-BY-NC-SA-4.0", "CC-BY-ND-4.0", "CC-BY-NC-ND-4.0", "CC0-1.0", "MIT", "GPL-3.0-or-later"]
 
@@ -122,22 +126,42 @@ Item {
         })
         return ""
     }
+    function plural(n, one, many) { return n + " " + (n === 1 ? one : many) }
     function size(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : n > 1024 ? Math.round(n / 1024) + " KB" : n + " B" }
     function day(ms) { return ms ? new Date(ms).toISOString().slice(0, 10) : "" }
     function ver() { if (!root.model) return null; var vs = root.model.versions; var i = root.openVersion > 0 ? root.openVersion - 1 : vs.length - 1; return vs[Math.min(i, vs.length - 1)] }
-    function openModel(id) { root.openId = id; root.openVersion = 0; root.model = null; root.refresh() }
+    function openModel(id) { root.openId = id; root.openVersion = 0; root.shownImage = 0; root.model = null; root.refresh() }
+    function clearDraft() {
+        root.draftFor = ""; root.draftParents = []; root.draftParentInfo = null; root.draftFiles = []; root.draftImages = []; root.draftKeep = []
+        pTitle.text = ""; pSummary.text = ""; pDesc.text = ""; pTags.text = ""; pLicence.currentIndex = 0
+    }
     function startRemix() {
         var v = root.ver(); if (!v) return
-        root.draftParents = [{ modelId: root.model.modelId, v: v.v }]; root.draftFor = ""
-        pTitle.text = "Remix of " + root.model.title; pLicence.currentIndex = Math.max(0, root.licences.indexOf(v.licence))
+        var info = { modelId: root.model.modelId, v: v.v, title: root.model.title, creatorName: root.model.creatorName, licence: v.licence }
+        root.clearDraft()
+        root.draftParents = [{ modelId: info.modelId, v: info.v }]; root.draftParentInfo = info
+        pTitle.text = "Remix of " + info.title; pLicence.currentIndex = Math.max(0, root.licences.indexOf(v.licence))
         root.openId = ""; root.model = null; root.tab = "publish"
     }
     function startNewVersion() {
         var v = root.ver(); if (!v) return
-        root.draftFor = root.model.modelId; root.draftParents = []
+        var mid = root.model.modelId
+        root.clearDraft()
+        root.draftFor = mid
+        root.draftParents = (v.parents || []).map(function (p) { return { modelId: p.modelId, v: p.v } })   // still a remix of the same original
         pTitle.text = v.title; pSummary.text = v.summary || ""; pDesc.text = v.description || ""; pTags.text = (v.tags || []).join(", ")
         pLicence.currentIndex = Math.max(0, root.licences.indexOf(v.licence))
+        // keep the files you already published; remove the ones you're replacing
+        root.draftKeep = (v.files || []).filter(function (f) { return !!f.local }).map(function (f) { return { sha256: f.sha256, name: f.name, size: f.size } })
         root.openId = ""; root.model = null; root.tab = "publish"
+    }
+    // ND forbids derivatives; SA wants the same licence on the remix
+    function licenceNote(parentLic, mine) {
+        if (!parentLic) return ""
+        if (parentLic.indexOf("-ND") >= 0) return "The original is " + parentLic + ": its author doesn't allow derivatives. Ask them first, or don't publish this remix."
+        if (parentLic.indexOf("-SA") >= 0 && mine !== parentLic) return "The original is " + parentLic + ": a remix has to use the same licence."
+        if (parentLic.indexOf("-NC") >= 0 && mine.indexOf("-NC") < 0) return "The original is " + parentLic + ": a remix has to stay non-commercial."
+        return ""
     }
     function pathOf(u) { var s = String(u); return s.indexOf("file://") === 0 ? decodeURIComponent(s.slice(7)) : s }
 
@@ -169,11 +193,12 @@ Item {
         T3 { anchors.centerIn: parent; visible: !parent.path; text: "no preview yet" }
     }
 
-    FileDialog { id: fileDlg; fileMode: FileDialog.OpenFiles; title: "Model files (STL, 3MF, STEP, ...)"
+    FileDialog { id: fileDlg; fileMode: FileDialog.OpenFiles; title: "Model files (STL, 3MF, STEP, ...)"; currentFolder: StandardPaths.writableLocation(StandardPaths.HomeLocation)
+        nameFilters: ["3D models and sources (*.stl *.3mf *.obj *.step *.stp *.scad *.f3d)", "All files (*)"]
         onAccepted: { var a = root.draftFiles.slice(); for (var i = 0; i < selectedFiles.length; i++) a.push(root.pathOf(selectedFiles[i])); root.draftFiles = a } }
-    FileDialog { id: imgDlg; fileMode: FileDialog.OpenFiles; title: "Photos (PNG, JPEG)"; nameFilters: ["Images (*.png *.jpg *.jpeg *.webp)"]
+    FileDialog { id: imgDlg; fileMode: FileDialog.OpenFiles; title: "Photos (PNG, JPEG)"; currentFolder: StandardPaths.writableLocation(StandardPaths.PicturesLocation); nameFilters: ["Images (*.png *.jpg *.jpeg *.webp)"]
         onAccepted: { var a = root.draftImages.slice(); for (var i = 0; i < selectedFiles.length; i++) a.push(root.pathOf(selectedFiles[i])); root.draftImages = a } }
-    FileDialog { id: makeDlg; fileMode: FileDialog.OpenFile; title: "A photo of your print"; nameFilters: ["Images (*.png *.jpg *.jpeg *.webp)"]
+    FileDialog { id: makeDlg; fileMode: FileDialog.OpenFile; title: "A photo of your print"; currentFolder: StandardPaths.writableLocation(StandardPaths.PicturesLocation); nameFilters: ["Images (*.png *.jpg *.jpeg *.webp)"]
         onAccepted: makePhoto.text = root.pathOf(selectedFile) }
 
     Rectangle { anchors.fill: parent; color: root.cBg }
@@ -197,16 +222,6 @@ Item {
                 delegate: LogosButton { Layout.preferredWidth: 110; text: (root.tab === modelData[0] && !root.openId ? "> " : "") + modelData[1]
                     onClicked: { root.openId = ""; root.model = null; root.tab = modelData[0]; root.refresh() } }
             }
-        }
-
-        Rectangle {
-            visible: root.toastMsg !== ""
-            Layout.fillWidth: true
-            implicitHeight: toastT.implicitHeight + 16
-            radius: root.rad
-            color: root.toastErr ? Qt.rgba(0.9, 0.33, 0.3, 0.15) : Qt.rgba(0.37, 0.72, 0.35, 0.15)
-            border.color: root.toastErr ? root.cErr : root.cOk
-            Text { id: toastT; textFormat: Text.PlainText; anchors.fill: parent; anchors.margins: 8; text: root.toastMsg; color: root.cText; wrapMode: Text.Wrap; font.pixelSize: 13 }
         }
 
         ScrollView {
@@ -257,8 +272,8 @@ Item {
                                     anchors.fill: parent; anchors.margins: root.spS; spacing: 4
                                     Thumb { Layout.fillWidth: true; Layout.preferredHeight: 190; path: modelData.thumb || "" }
                                     T1 { Layout.fillWidth: true; text: modelData.title; font.pixelSize: 14; elide: Text.ElideRight; maximumLineCount: 2 }
-                                    T3 { Layout.fillWidth: true; text: "by " + modelData.creatorName + "  ·  " + modelData.licence + (modelData.remix ? "  ·  remix" : "") }
-                                    T3 { Layout.fillWidth: true; text: modelData.likes + " likes  ·  " + modelData.makes + " makes  ·  v" + modelData.latest }
+                                    T3 { Layout.fillWidth: true; text: "by " + modelData.creatorName + "  ·  " + modelData.licence + (modelData.remix ? "  ·  remix" : "") + (modelData.retracted ? "  ·  retracted" : "") }
+                                    T3 { Layout.fillWidth: true; text: root.plural(modelData.likes, "like", "likes") + "  ·  " + root.plural(modelData.makes, "make", "makes") + "  ·  v" + modelData.latest }
                                 }
                                 MouseArea { id: hov; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.openModel(modelData.modelId) }
                             }
@@ -282,14 +297,27 @@ Item {
                         visible: !!root.model
                         RowLayout {
                             Layout.fillWidth: true; spacing: root.sp
-                            Thumb { Layout.preferredWidth: 300; Layout.preferredHeight: 300; Layout.alignment: Qt.AlignTop
-                                path: { var v = root.ver(); if (!v || !v.images) return ""; for (var i = 0; i < v.images.length; i++) if (v.images[i].local) return v.images[i].local; return "" } }
+                            ColumnLayout { Layout.alignment: Qt.AlignTop; spacing: root.spS
+                                Thumb { Layout.preferredWidth: 300; Layout.preferredHeight: 300
+                                    path: { var v = root.ver(); if (!v || !v.images || !v.images.length) return ""; var im = v.images[Math.min(root.shownImage, v.images.length - 1)]; return im.local || "" } }
+                                // every picture of this version: the thumbnail plus the creator's photos
+                                Flow { Layout.preferredWidth: 300; spacing: 6; visible: !!root.ver() && (root.ver().images || []).length > 1
+                                    Repeater { model: root.ver() ? (root.ver().images || []) : []
+                                        delegate: Thumb { width: 66; height: 66; path: modelData.local || ""
+                                            border.color: index === root.shownImage ? root.cPrimary : root.cLine
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.shownImage = index } } } }
+                            }
                             ColumnLayout {
                                 Layout.fillWidth: true; Layout.alignment: Qt.AlignTop; spacing: 6
                                 T1 { Layout.fillWidth: true; font.pixelSize: 20; text: root.model ? root.model.title : "" }
                                 T2 { Layout.fillWidth: true; text: root.model ? ("by " + root.model.creatorName + "  ·  " + (root.ver() ? root.ver().licence : "") + "  ·  published " + root.day(root.ver() ? root.ver().published : 0)) : "" }
                                 T2 { Layout.fillWidth: true; visible: !!root.ver() && !!root.ver().summary; text: root.ver() ? (root.ver().summary || "") : "" }
-                                T3 { Layout.fillWidth: true; visible: !!root.ver() && (root.ver().parents || []).length > 0; text: "Remix of " + ((root.ver() && root.ver().parents) ? root.ver().parents.map(function (p) { return p.modelId.slice(0, 8) + " v" + p.v }).join(", ") : "") }
+                                Flow { Layout.fillWidth: true; spacing: 4; visible: !!root.ver() && (root.ver().parents || []).length > 0
+                                    T3 { text: "Remix of" }
+                                    Repeater { model: root.ver() ? (root.ver().parents || []) : []
+                                        delegate: Text { textFormat: Text.PlainText; color: root.cPrimary; font.pixelSize: 11; font.underline: true
+                                            text: (modelData.title || modelData.modelId.slice(0, 8)) + " v" + modelData.v + (modelData.creatorName ? " by " + modelData.creatorName : "")
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.openModel(modelData.modelId) } } } }
                                 T3 { Layout.fillWidth: true; visible: !!root.model && root.model.retracted; color: root.cWarn; text: "The creator retracted this model" + (root.model && root.model.retractReason ? ": " + root.model.retractReason : "") }
                                 RowLayout {
                                     T3 { text: "Version" }
@@ -302,16 +330,18 @@ Item {
                                     Repeater { model: root.ver() ? (root.ver().tags || []) : []
                                         delegate: Rectangle { width: tg.implicitWidth + 14; height: 22; radius: 11; color: root.cInset; border.color: root.cLine
                                             Text { id: tg; textFormat: Text.PlainText; anchors.centerIn: parent; text: modelData; color: root.cText2; font.pixelSize: 11 } } } }
+                                // fixed slots: a button never moves because another one appeared
                                 RowLayout {
                                     spacing: root.spS
-                                    LogosButton { text: { var d = root.ver() && root.ver().download; return d ? (d.status === "done" ? "Downloaded" : d.status === "failed" ? "Retry download" : "Downloading...") : "Download" }
+                                    LogosButton { Layout.preferredWidth: 130; text: { var d = root.ver() && root.ver().download; return d ? (d.status === "done" ? "Download again" : d.status === "failed" ? "Retry download" : "Downloading...") : "Download" }
                                         onClicked: root.act("download", [root.model.modelId, String(root.ver().v)], "Downloading into your Swamp folder") }
-                                    LogosButton { visible: !!(root.ver() && root.ver().download && root.ver().download.status === "done"); text: "Open folder"
+                                    LogosButton { Layout.preferredWidth: 110; enabled: !!(root.ver() && root.ver().download && root.ver().download.status === "done"); text: "Open folder"
                                         onClicked: Qt.openUrlExternally(root.fileUrl(root.ver().download.dir)) }
-                                    LogosButton { text: root.model && root.model.likedByMe ? "Unlike (" + root.model.likes + ")" : "Like (" + (root.model ? root.model.likes : 0) + ")"
+                                    LogosButton { Layout.preferredWidth: 110; text: root.model && root.model.likedByMe ? "Unlike (" + root.model.likes + ")" : "Like (" + (root.model ? root.model.likes : 0) + ")"
                                         onClicked: root.act("like", [root.model.modelId, root.model.likedByMe ? "false" : "true"], "") }
-                                    LogosButton { text: "Remix"; onClicked: root.startRemix() }
-                                    LogosButton { visible: !!root.model && root.model.mine; text: "New version"; onClicked: root.startNewVersion() }
+                                    LogosButton { Layout.preferredWidth: 100; text: "Remix"; onClicked: root.startRemix() }
+                                    LogosButton { Layout.preferredWidth: 120; visible: !!root.model && root.model.mine; text: "New version"; onClicked: root.startNewVersion() }
+                                    LogosButton { Layout.preferredWidth: 100; visible: !!root.model && root.model.mine && !root.model.retracted; text: "Retract"; onClicked: retractDlg.open() }
                                 }
                                 T3 { Layout.fillWidth: true; visible: !!(root.ver() && root.ver().download && root.ver().download.error); color: root.cErr; text: root.ver() && root.ver().download ? (root.ver().download.error || "") : "" }
                             }
@@ -383,6 +413,10 @@ Item {
                 Card {
                     visible: root.tab === "publish" && !root.openId
                     T1 { text: root.draftFor ? "Publish a new version" : (root.draftParents.length ? "Publish a remix" : "Publish a model") }
+                    T2 { Layout.fillWidth: true; visible: !!root.draftParentInfo; color: root.cText
+                        text: root.draftParentInfo ? "Remixing " + root.draftParentInfo.title + " v" + root.draftParentInfo.v + " by " + root.draftParentInfo.creatorName + " (" + root.draftParentInfo.licence + "). The original is credited and linked." : "" }
+                    T2 { Layout.fillWidth: true; color: root.cWarn; visible: text !== ""
+                        text: root.draftParentInfo ? root.licenceNote(root.draftParentInfo.licence, pLicence.currentText) : "" }
                     T2 { Layout.fillWidth: true; text: "Your files stay on this device and are shared through Logos Storage. A thumbnail and a shape fingerprint are made from the first STL. Published versions can't be edited - publish a new one instead." }
                     GridLayout {
                         columns: 2; columnSpacing: root.sp; rowSpacing: root.spS; Layout.fillWidth: true
@@ -398,7 +432,11 @@ Item {
                         ComboBox { id: pLicence; model: root.licences; Layout.fillWidth: true }
                         T3 { text: "Files" }
                         ColumnLayout { Layout.fillWidth: true
-                            Repeater { model: root.draftFiles; delegate: T2 { text: modelData } }
+                            Repeater { model: root.draftKeep
+                                delegate: RowLayout { T2 { text: modelData.name + "  (" + root.size(modelData.size) + ", from the previous version)" }
+                                    Text { textFormat: Text.PlainText; text: "remove"; color: root.cPrimary; font.pixelSize: 11; font.underline: true
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var a = root.draftKeep.slice(); a.splice(index, 1); root.draftKeep = a } } } } }
+                            Repeater { model: root.draftFiles; delegate: T2 { text: modelData.split("/").pop() + "   " + modelData } }
                             RowLayout { LogosButton { text: "Add files..."; onClicked: fileDlg.open() }
                                         LogosButton { visible: root.draftFiles.length > 0; text: "Clear"; onClicked: root.draftFiles = [] } }
                             Field { id: pPath; placeholderText: "...or paste a file path and press Enter"; onAccepted: { if (text) { var a = root.draftFiles.slice(); a.push(text); root.draftFiles = a; text = "" } } }
@@ -416,17 +454,17 @@ Item {
                             onClicked: {
                                 var d = { title: pTitle.text, summary: pSummary.text, description: pDesc.text, licence: pLicence.currentText,
                                           tags: pTags.text.split(",").map(function (t) { return t.trim() }).filter(function (t) { return t.length > 0 }),
-                                          parents: root.draftParents, files: root.draftFiles.map(function (p) { return { path: p } }),
+                                          parents: root.draftParents, files: root.draftKeep.map(function (f) { return { sha256: f.sha256, name: f.name } }).concat(root.draftFiles.map(function (p) { return { path: p } })),
                                           images: root.draftImages.map(function (p) { return { path: p } }) }
                                 if (root.draftFor) d.modelId = root.draftFor
                                 root.act("publish", [JSON.stringify(d)], "Published - files are uploading in the background", function (r) {
-                                    root.draftFiles = []; root.draftImages = []; root.draftParents = []; root.draftFor = ""
+                                    root.clearDraft()
                                     pTitle.text = ""; pSummary.text = ""; pDesc.text = ""; pTags.text = ""
                                     root.tab = "mine"; root.openModel(r.modelId)
                                 })
                             }
                         }
-                        LogosButton { visible: !!root.draftFor || root.draftParents.length > 0; text: "Cancel"; onClicked: { root.draftFor = ""; root.draftParents = [] } }
+                        LogosButton { visible: !!root.draftFor || root.draftParents.length > 0; text: "Cancel"; onClicked: root.clearDraft() }
                     }
                 }
 
@@ -451,7 +489,7 @@ Item {
                         T1 { text: "This node" }
                         T2 { Layout.fillWidth: true; text: (root.st.status || "?") + (root.st.hub ? "  ·  running as a pinning hub" : "") }
                         T3 { Layout.fillWidth: true; text: root.st.catalog ? (root.st.catalog.models + " models, " + root.st.catalog.events + " catalogue events, " + root.st.catalog.cids + " known files") : "" }
-                        T3 { Layout.fillWidth: true; text: root.st.counters ? ("rx " + root.st.counters.rx + " / tx " + root.st.counters.tx + "  ·  uploaded " + root.st.counters.uploaded + "  ·  fetched " + root.st.counters.fetched + (root.st.counters.verifyFailed ? "  ·  rejected " + root.st.counters.verifyFailed + " bad files" : "")) : "" }
+                        T3 { Layout.fillWidth: true; text: root.st.counters ? ("since start: rx " + root.st.counters.rx + " / tx " + root.st.counters.tx + "  ·  uploaded " + root.st.counters.uploaded + "  ·  fetched " + root.st.counters.fetched + (root.st.counters.verifyFailed ? "  ·  rejected " + root.st.counters.verifyFailed + " bad files" : "")) : "" }
                         T3 { Layout.fillWidth: true; text: root.st.storage ? ("Storage: " + (root.st.storage.hostOwned ? "Basecamp's node" : "own node") + "  ·  downloads go to " + root.st.storage.downloads) : "" }
                         RowLayout {
                             LogosButton { text: "Sync now"; onClicked: root.act("resync", [], "Asked peers for anything missing") }
@@ -466,5 +504,34 @@ Item {
             color: root.st.status === "Connected" ? root.cOk : root.cWarn
             text: (root.st.status || "Connecting to swamp_core...") + "   |   core " + (root.st.version || "?") + "   |   " + (root.st.catalog ? root.st.catalog.models + " models" : "")
         }
+    }
+    Rectangle {
+        // floats over the page so showing it doesn't move what you're about to click
+        visible: root.toastMsg !== ""; z: 10
+        anchors.horizontalCenter: parent.horizontalCenter; anchors.bottom: parent.bottom; anchors.bottomMargin: 40
+        width: Math.min(parent.width - 80, 720)
+        implicitHeight: toastT.implicitHeight + 16
+        radius: root.rad
+        color: root.toastErr ? Qt.rgba(0.9, 0.33, 0.3, 0.15) : Qt.rgba(0.37, 0.72, 0.35, 0.15)
+        border.color: root.toastErr ? root.cErr : root.cOk
+        Text { id: toastT; textFormat: Text.PlainText; anchors.fill: parent; anchors.margins: 8; text: root.toastMsg; color: root.cText; wrapMode: Text.Wrap; font.pixelSize: 13 }
+        }
+
+
+    Dialog {
+        id: retractDlg
+        title: "Retract this model?"
+        modal: true; anchors.centerIn: parent; width: 520; padding: root.sp
+        background: Rectangle { color: root.cCard; radius: root.rad + 4; border.color: root.cLine }
+        header: T1 { text: "Retract this model?"; padding: root.sp; bottomPadding: 0 }
+        footer: RowLayout { spacing: root.spS
+            Item { Layout.fillWidth: true }
+            LogosButton { text: "Cancel"; onClicked: retractDlg.reject() }
+            LogosButton { text: "Retract"; onClicked: retractDlg.accept() }
+            Item { width: root.sp } }
+        ColumnLayout { anchors.fill: parent; spacing: root.spS
+            T2 { Layout.fillWidth: true; text: "It disappears from listings everywhere it syncs. Copies people already downloaded stay theirs, and anyone looking at the model sees that you retracted it." }
+            Field { id: retractReason; placeholderText: "Why (optional) - e.g. replaced by a better model" } }
+        onAccepted: { root.act("retract", [root.model.modelId, retractReason.text], "Retracted", function () { retractReason.text = ""; root.openId = ""; root.model = null }) }
     }
 }

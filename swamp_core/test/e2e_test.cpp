@@ -109,6 +109,19 @@ int main(int argc, char** argv) {
     json rmx = bob->call(bob->core.publish(json{{"title", "Bracelet with clasp"}, {"licence", "CC-BY-4.0"}, {"parents", {{{"modelId", mid}, {"v", 1}}}}, {"files", {{{"path", stl1}}}}}.dump()));
     CHECK(waitFor([&] { return json::parse(alice->core.getModel(mid))["model"]["remixes"].size() == 1; }), "alice's model lists bob's remix");
     CHECK(json::parse(alice->core.listModels("{}"))["models"].size() == 2, "two models in the catalogue");
+    {   // a remix's page names and links its parent; a new version can carry files over by hash
+        json rm = json::parse(alice->core.getModel(rmx.value("modelId", "")))["model"];
+        json par = rm["versions"][0]["parents"][0];
+        CHECK(par.value("title", "") == "Geometric bracelet" && par.value("creatorName", "") == "Alice", "remix parent comes with its title and creator");
+        json v2 = json::parse(alice->core.getModel(mid))["model"]["versions"][1]["files"][0];
+        json keep = json::parse(alice->core.publish(json{{"modelId", mid}, {"title", "Geometric bracelet (v3)"}, {"licence", "CC-BY-4.0"},
+            {"files", {{{"sha256", v2["sha256"]}, {"name", v2["name"]}}, {{"path", stl1}}}}}.dump()));
+        json v3 = json::parse(alice->core.getModel(mid))["model"]["versions"][2];
+        CHECK(keep.value("ok", false) && v3["files"].size() == 2 && v3["files"][0]["name"] == v2["name"] && v3["files"][0]["sha256"] == v2["sha256"], "new version keeps a file carried over by hash");
+        json missing = json::parse(alice->core.publish(json{{"modelId", mid}, {"title", "x"}, {"licence", "CC-BY-4.0"},
+            {"files", {{{"sha256", std::string(64, 'a')}, {"name", "gone.stl"}}}}}.dump()));
+        CHECK(!missing.value("ok", true), "carrying over a file the node doesn't hold is refused");
+    }
 
     // a bogus CID (served bytes don't match the hash) is rejected, never saved
     Peer* mallory = spawn("mallory");
