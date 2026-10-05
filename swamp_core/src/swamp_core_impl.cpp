@@ -21,7 +21,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.3.0";
+static const char* SWAMP_VERSION = "0.4.0";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -47,6 +47,7 @@ static constexpr int kHubConcurrency = 3;
 static constexpr long long kImageMaxBytes = 16 * 1024 * 1024;
 static constexpr size_t kImageCacheFiles = 300;
 static constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
+static constexpr long long kRecordRefreshMs = 60000;   // refresh a model held only through the index
 static constexpr int kPrivateRounds = 2;            // failed private (Mix) rounds before a shard fetch goes plain
 static constexpr int kJobRounds = 3;                 // full passes over a file's CIDs before a download fails
 
@@ -166,6 +167,11 @@ void SwampCoreImpl::setupDataDir() {
     const char* ix = getenv("SWAMP_INDEXER");
     m_indexer = m_hub || (ix && (std::string(ix) == "1" || std::string(ix) == "true"));
     if (const char* ev = getenv("SWAMP_INDEX_EVERY_MS")) m_indexEveryMs = std::max(1000LL, atoll(ev));
+    if (const char* ie = getenv("SWAMP_INCLUSION_EVERY_MS")) m_inclusionEveryMs = std::max(1000LL, atoll(ie));
+    if (const char* ig = getenv("SWAMP_INCLUSION_GRACE_MS")) m_inclusionGraceMs = std::max(0LL, atoll(ig));
+    if (const char* t = getenv("SWAMP_TEST_OMIT")) m_testOmit = t;
+    const char* pf = getenv("SWAMP_PRIVATE_FETCH");
+    m_privateShards = pf && (std::string(pf) == "1" || std::string(pf) == "true");
 }
 std::string SwampCoreImpl::blobPath(const std::string& sha) const { return m_dataDir + "/files/" + sha; }
 bool SwampCoreImpl::haveBlob(const std::string& sha) const { std::error_code ec; return fs::exists(blobPath(sha), ec); }
@@ -196,6 +202,21 @@ void SwampCoreImpl::saveSettings() {
     json c = json::array();
     for (const auto& id : m_subs) c.push_back(id);
     writeFile(m_dataDir + "/settings.json", json{{"categories", c}}.dump());
+}
+json SwampCoreImpl::omissionsJson() {
+    json a = json::array();
+    for (const auto& [who, ev] : m_omissions) a.push_back(ev);
+    return a;
+}
+json SwampCoreImpl::excludedMineJson() {
+    json a = json::array();
+    for (const auto& [k, why] : m_excludedMine) {
+        std::string who = k.substr(0, k.find('|')), id = k.substr(k.find('|') + 1);
+        auto mi = m_cat.models.find(id);
+        a.push_back({{"indexer", who}, {"indexerName", nameOf(who)}, {"modelId", id}, {"why", why},
+                     {"title", mi != m_cat.models.end() && !mi->second.versions.empty() ? mi->second.versions.back().value("title", "") : ""}});
+    }
+    return a;
 }
 json SwampCoreImpl::categoriesJson() {
     std::map<std::string, int> count;
@@ -852,6 +873,7 @@ void SwampCoreImpl::advanceJobs() {
         j.error.clear();
         for (const auto& [sha, name] : j.files) {
             if (haveBlob(sha)) { have++; continue; }
+            if (cidsFor(sha).empty()) refreshRecord(j.modelId);   // its CIDs may be in a newer index
             startFetch(sha, declaredSize(m_cat, j.modelId, j.v, sha));
             auto fi = m_fetch.find(sha);
             if (fi == m_fetch.end()) continue;
@@ -952,6 +974,7 @@ void SwampCoreImpl::tick() {
         }
         flushAnnouncements();
         indexTick();
+        checkInclusion();
         if (m_ready && now - m_lastCatchup > kCatchupEveryMs) catchupRound();
     } catch (const std::exception& e) {
         fprintf(stderr, "[swamp] tick: %s\n", e.what());
@@ -994,7 +1017,8 @@ std::string SwampCoreImpl::snapshot() {
     return json{{"ok", true}, {"version", SWAMP_VERSION}, {"status", m_status}, {"hub", m_hub},
                 {"me", {{"address", m_id.address}, {"profile", profile}}},
                 {"categories", categoriesJson()},
-                {"index", {{"indexer", m_indexer}, {"built", m_indexesBuilt}, {"known", m_cat.indexes.size()}, {"privacyDowngrades", m_privacyDowngrades}}},
+                {"index", {{"indexer", m_indexer}, {"built", m_indexesBuilt}, {"known", m_cat.indexes.size()}, {"privacyDowngrades", m_privacyDowngrades},
+                           {"omissions", omissionsJson()}, {"excludedMine", excludedMineJson()}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
                 {"catalog", {{"events", m_log.size()}, {"models", visible}, {"rejected", m_cat.rejected}, {"cids", m_cat.cids.size()}}},
                 {"counters", {{"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
@@ -1056,6 +1080,8 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
         it = m_cat.models.find(modelId);
         if (it == m_cat.models.end() || it->second.versions.empty()) return fail("No such model");
     }
+    refreshRecord(modelId);
+    it = m_cat.models.find(modelId);
     const Model& m = it->second;
     json versions = json::array();
     for (const auto& v : m.versions) {
@@ -1175,6 +1201,7 @@ void SwampCoreImpl::indexTick() {
         }
         json mf{{"v", index::VERSION}, {"epoch", num(m_indexPending, "epoch")}, {"root", str(m_indexPending, "root")},
                 {"models", num(m_indexPending, "models")}, {"shards", shards}};
+        if (!m_indexPending["excluded"].empty()) mf["excluded"] = m_indexPending["excluded"];
         author("index.manifest", mf);
         m_indexesBuilt++;
         m_indexPending = nullptr;
@@ -1190,8 +1217,18 @@ void SwampCoreImpl::indexTick() {
     if (visibleModels == 0) return;
     m_lastIndex = now;
     m_indexRoot = root;
-    auto shards = index::build(m_cat, content);
-    json pend{{"epoch", now / 1000}, {"root", root}, {"models", 0}, {"shards", json::object()}};
+    // the hub's content policy: <data>/exclusions.json = {"<modelId>": "why"}; declared in the
+    // manifest. SWAMP_TEST_OMIT silently drops a model - for testing omission proofs only.
+    std::set<std::string> excluded, omit;
+    json excl = json::array();
+    { std::string ex; json ej = readFile(m_dataDir + "/exclusions.json", ex) ? json::parse(ex, nullptr, false) : json();
+      if (ej.is_object()) for (auto it = ej.begin(); it != ej.end() && excl.size() < 200; ++it)
+          if (isHex(it.key(), 32) && it.value().is_string()) { excluded.insert(it.key()); excl.push_back({{"m", it.key()}, {"why", it.value().get<std::string>().substr(0, 140)}}); } }
+    if (!m_testOmit.empty()) omit.insert(m_testOmit);
+    std::set<std::string> leaveOut = excluded;
+    leaveOut.insert(omit.begin(), omit.end());
+    auto shards = index::build(m_cat, content, leaveOut);
+    json pend{{"epoch", now / 1000}, {"root", root}, {"models", 0}, {"shards", json::object()}, {"excluded", excl}};
     int models = 0;
     for (const auto& [id, m] : m_cat.models) models += !m.versions.empty() && !m.retracted;
     pend["models"] = models;
@@ -1210,10 +1247,52 @@ void SwampCoreImpl::indexTick() {
 // CLIENT: the manifest to search - the newest one, from any indexer. How many indexers agree with
 // it (same catalogue root, same shard hashes) is reported with every answer (ADR 0016 builds on it).
 json SwampCoreImpl::bestManifest() {
-    json best;
-    for (const auto& [who, mf] : m_cat.indexes)
-        if (best.is_null() || num(mf, "published") > num(best, "published")) best = mf;
-    return best;
+    json best, fallback;
+    for (const auto& [who, mf] : m_cat.indexes) {
+        bool caught = m_omissions.count(who) > 0;   // signed proof it left something out undeclared
+        json& slot = caught ? fallback : best;
+        if (slot.is_null() || num(mf, "published") > num(slot, "published")) slot = mf;
+    }
+    return best.is_null() ? fallback : best;
+}
+
+// CREATORS AUDIT THE INDEXERS (ADR 0016). For every indexer's newest manifest, check that each of
+// my models published well before that index is in it - in the term shard of its first title
+// word - or declared excluded. A missing one is evidence: the indexer signed a manifest naming a
+// shard (by hash) that leaves my model out. Clients stop preferring that indexer.
+void SwampCoreImpl::checkInclusion() {
+    long long now = nowMs();
+    if (now - m_lastInclusion < m_inclusionEveryMs) return;
+    m_lastInclusion = now;
+    for (const auto& [who, mf] : m_cat.indexes) {
+        if (who == m_id.address) continue;
+        std::set<std::string> declared;
+        for (const auto& x : arr(mf, "excluded")) declared.insert(str(x, "m"));
+        for (const auto& [id, m] : m_cat.models) {
+            if (m.creator != m_id.address || m.versions.empty() || m.retracted) continue;
+            if (m.created > num(mf, "epoch") * 1000 - m_inclusionGraceMs) continue;   // too new to expect
+            if (declared.count(id)) {
+                std::string why;
+                for (const auto& x : arr(mf, "excluded")) if (str(x, "m") == id) why = str(x, "why");
+                m_excludedMine[who + "|" + id] = why;
+                continue;
+            }
+            auto ws = index::words(m.versions.back().value("title", ""));
+            if (ws.empty()) continue;
+            std::string key = index::shardKeyFor(ws[0]);
+            json sh = shard(mf, key);
+            if (sh.is_null()) { m_lastInclusion = now - m_inclusionEveryMs + 5000; continue; }   // fetching: look again soon
+            bool there = sh.contains("entries") && sh["entries"].contains(id);
+            if (!there && !m_omissions.count(who)) {
+                std::string sha = mf.contains("shards") && mf["shards"].contains(key) ? str(mf["shards"][key], "sha256") : "";
+                m_omissions[who] = json{{"indexer", who}, {"indexerName", nameOf(who)}, {"manifestEvent", str(mf, "eventId")},
+                                        {"epoch", num(mf, "epoch")}, {"modelId", id}, {"title", m.versions.back().value("title", "")},
+                                        {"shard", key}, {"shardSha256", sha}, {"shardMissing", sha.empty()}, {"modelCreated", m.created}, {"seen", now}};
+                fprintf(stderr, "[swamp] OMISSION: indexer %s left out my model %s (shard %s)\n", who.substr(0, 10).c_str(), id.substr(0, 8).c_str(), key.c_str());
+                publishState();
+            }
+        }
+    }
 }
 // A shard the manifest names: parsed if we hold it, else queued for a private fetch (null).
 json SwampCoreImpl::shard(const json& mf, const std::string& key) {
@@ -1229,7 +1308,10 @@ json SwampCoreImpl::shard(const json& mf, const std::string& key) {
         return json::object();
     }
     m_extraCids[sha] = {str(ref, "cid")};
-    m_privateFetch.insert(sha);
+    // Private (Mix) shard fetches are opt-in: on logos.test (2026-10) every Mix lookup failed, and a
+    // failed private request left the blocks wanted over a dead Mix route, so even the plain retry
+    // stalled. The UI says searches aren't private while this is off.
+    if (m_privateShards) m_privateFetch.insert(sha);
     startFetch(sha, num(ref, "size"));
     return nullptr;
 }
@@ -1276,7 +1358,7 @@ std::string SwampCoreImpl::globalSearch(std::string queryJson) {
     return ok(json{{"results", results}, {"pending", pending},
                    {"index", {{"indexer", str(mf, "indexer")}, {"indexerName", nameOf(str(mf, "indexer"))}, {"models", num(mf, "models")},
                               {"ageMs", nowMs() - num(mf, "published")}, {"indexers", m_cat.indexes.size()}, {"agreeing", agree},
-                              {"privacyDowngrades", m_privacyDowngrades}}}});
+                              {"privacyDowngrades", m_privacyDowngrades}, {"private", m_privateShards}}}});
 }
 
 // Opening a model you don't follow: take its events from the index's record shard - only that
@@ -1296,7 +1378,24 @@ bool SwampCoreImpl::fetchRecord(const std::string& modelId, bool& pending) {
         if (e.type != "profile.put" && index::modelOfEvent(e, bucket) == modelId) { authors.insert(e.dev); any |= ingest(e); }
     for (const auto& e : evs) if (e.type == "profile.put" && authors.count(e.dev)) ingest(e);
     if (any) refold();
-    return m_cat.models.count(modelId) > 0;
+    m_recordAt[modelId] = nowMs();
+    auto mi = m_cat.models.find(modelId);
+    if (mi == m_cat.models.end()) return false;
+    // listen on its category for events about it (CIDs announced later, new comments) - only
+    // about models we hold, not the whole category (handleFrame)
+    ensureJoined(categoryTopic(mi->second.category));
+    return true;
+}
+// A model held only through the index goes stale: refresh its record from the newest manifest
+// now and then (the shard cache is keyed by hash, so an unchanged index costs nothing).
+void SwampCoreImpl::refreshRecord(const std::string& modelId) {
+    auto mi = m_cat.models.find(modelId);
+    if (mi == m_cat.models.end() || m_subs.count(mi->second.category) || mi->second.creator == m_id.address) return;
+    auto at = m_recordAt.find(modelId);
+    if (at != m_recordAt.end() && nowMs() - at->second < kRecordRefreshMs) return;
+    bool pending = false;
+    fetchRecord(modelId, pending);
+    if (pending) m_recordAt[modelId] = nowMs() - kRecordRefreshMs + 5000;   // shard on its way: look again soon
 }
 
 // ---- creators -------------------------------------------------------------------------------

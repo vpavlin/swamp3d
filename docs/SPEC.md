@@ -127,10 +127,30 @@ unsigned, badly signed, or of an unknown type. Payload size limit: 16 KiB per ev
 - **Clients** search the newest manifest.
   - Every query word must match a term exactly or as a prefix (AND across words); results are ranked
     by title matches, likes, then date.
-  - Shards are fetched with `isPrivate=true, advertise=false`. After 2 failed private rounds a fetch
-    falls back to a plain one, and `privacyDowngrades` counts it.
+  - Private shard fetches (`isPrivate=true, advertise=false`, over Storage's Mix) are **opt-in**
+    (`SWAMP_PRIVATE_FETCH=1`). Measured on logos.test, 2026-10-05: every Mix lookup proxy failed
+    (decode errors, dial failures, timeouts), and a failed private request left the blocks wanted over
+    a dead Mix route. The holder kept failing to "send through any SURB", so even the plain retry of
+    the same shard stalled at 0 bytes. Ordinary files fetched fine. With private fetch off, the hub
+    serving a shard can see which shard (a term prefix) a node fetched; the view says so. When on,
+    after 2 failed private rounds a fetch falls back to plain, and `privacyDowngrades` counts it.
   - Models opened from search are folded in (only their own events) but don't appear in Browse
     unless you follow their category.
+
+## 4c. Auditing indexers (ADR 0016)
+
+- **Declared exclusions:** an indexer's content policy is `<data>/exclusions.json`
+  (`{"<modelId>": "why"}`, ≤ 200). Excluded models are left out of the index and listed in the
+  manifest's `excluded`.
+- **Creator inclusion check:** every `SWAMP_INCLUSION_EVERY_MS` (5 min), a node checks each other
+  indexer's newest manifest for each of its own models created more than `SWAMP_INCLUSION_GRACE_MS`
+  (10 min) before the index epoch. The check fetches the term shard of the model's first title word.
+  - Declared: reported to the creator (`snapshot().index.excludedMine`).
+  - Missing and undeclared: recorded as evidence in `snapshot().index.omissions`: the indexer, the
+    signed manifest event id, the shard key and its sha256 (or `shardMissing`), the model, its
+    creation time.
+- `bestManifest` prefers indexers with no evidence against them.
+- Not done yet: sharing evidence with other nodes (signed reports) and live query hubs.
 
 ## 5. Fold → catalogue state
 

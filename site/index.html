@@ -160,7 +160,7 @@
         to. You can't edit history and nobody can quietly delete it. Retract your own model and it hides, but it
         doesn't vanish from the people who have it.</span></div>
       <div><b>Murky</b><span>Browse the categories you follow from your own copy: offline, and nobody learns what
-        you look at. Search everything else by fetching index pieces privately over a mixnet.</span></div>
+        you look at. Search everything else by fetching only the index piece your query needs (privately over a mixnet, once the network's mixnet works).</span></div>
       <div><b>No landlord</b><span>No accounts. Your identity is a key on your device. Anyone can run a hub, and no
         hub is in charge.</span></div>
       <div><b>Teeming</b><span>Remixes link to what they remix. Makes come with photos. Comments, likes, versions.
@@ -183,7 +183,7 @@
         categories you follow, like Tools, Toys and Gridfinity, and nothing else. Fast, offline and private, and it
         doesn't need a data centre.</p></div>
       <div class="card"><svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="13" r="8"/><path d="M19 19l8 8"/></g></svg><h3>Search everywhere</h3><p>Indexing hubs publish signed,
-        deterministic index snapshots. You fetch only the piece your query needs, privately, and rank results
+        deterministic index snapshots. You fetch only the piece your query needs and rank results
         yourself. Two honest indexers produce identical bytes, so leaving something out shows.</p></div>
       <div class="card"><svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 25c4-3 22-3 26 0"/><path d="M15 24c0-6 1-11 3-15M18 9c-4-2-8-1-10 2M18 9c3-3 7-3 9-1M18 9c1 3 0 6-2 8"/></g></svg><h3>Hubs, not landlords</h3><p>Anyone can run a hub to keep
         files alive and answer searches. A hub may refuse content, but it must say what it drops and why.
@@ -244,11 +244,12 @@
       <li class="done"><span>Shape fingerprints and a benchmark. <small>Whole-object copies detected 95-100% at 0.1% false positives.</small></span></li>
       <li class="done"><span>Publish, browse, versions, remixes, makes, comments, likes, verified downloads. <small>Tested headless and in Basecamp 0.3.1 on the Logos test network.</small></span></li>
       <li class="done"><span>Follow categories instead of mirroring everything. Lazy pictures.</span></li>
-      <li class="done"><span>Global search over signed index snapshots, fetched privately. <small>Built; being proven on the live network.</small></span></li>
+      <li class="done"><span>Global search over signed index snapshots. <small>Proven on the Logos test network: found, opened and downloaded a model from a category the node doesn't follow. Private (mixnet) fetching is built, but switched off until the network's mixnet works.</small></span></li>
+      <li class="done"><span>Creators audit the indexers. <small>A hub that silently leaves your model out gets caught with its own signature; a declared exclusion is shown as policy.</small></span></li>
       <li><span>An always-on hub, so two people behind home routers can share files.</span></li>
       <li><span>Copy labels for exact and whole-object copies.</span></li>
       <li><span>"Who published first" anchored on LEZ.</span></li>
-      <li><span>Anonymous query hubs with audits and provable omission.</span></li>
+      <li><span>Live anonymous query hubs, and sharing evidence between nodes.</span></li>
       <li><span>Edited-copy detection, labelers and disputes. Tips.</span></li>
     </ol>
     <p class="disclaimer"><strong>Not endorsed by or affiliated with Logos.</strong> Swamp is an independent

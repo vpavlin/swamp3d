@@ -50,5 +50,6 @@ cost a few downloads, not a sync.
 - Because shards are deterministic and signed, **omission is provable** (0016 builds on this).
 - Indexers spend storage and a few RLN messages per epoch (announcing the manifest). Clients
   spend one manifest fetch plus one or two shard fetches per new term.
-- **To verify:** that Storage's private (Mix) fetch works for small files at acceptable latency on
-  logos.test.
+- **Verified 2026-10-05, negative:** Storage's private (Mix) fetch did not work on logos.test (every
+  Mix lookup proxy failed; a failed private request also poisoned the plain retry). Private fetch is
+  therefore opt-in (`SWAMP_PRIVATE_FETCH=1`), and the UI says searches aren't private until it works.

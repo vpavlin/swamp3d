@@ -73,10 +73,12 @@ inline std::string modelOfEvent(const Event& e, const Catalog& c) {
 
 // Build every shard from a folded catalogue and its event log. Deterministic: models and terms
 // are visited in sorted order, events by id, and json objects serialise with sorted keys.
-inline std::map<std::string, json> build(const Catalog& c, const std::vector<Event>& log) {
+// `excluded`: models this indexer declines to carry - declared in its manifest (ADR 0016), so
+// leaving them out is a published policy, not a silent omission.
+inline std::map<std::string, json> build(const Catalog& c, const std::vector<Event>& log, const std::set<std::string>& excluded = {}) {
     std::map<std::string, json> shards;
     std::map<std::string, json> entries;
-    for (const auto& [id, m] : c.models) if (!m.versions.empty() && !m.retracted) entries[id] = entryOf(m, c);
+    for (const auto& [id, m] : c.models) if (!m.versions.empty() && !m.retracted && !excluded.count(id)) entries[id] = entryOf(m, c);
     for (const auto& [id, e] : entries) {
         for (const auto& term : termsOf(e)) {
             json& sh = shards[shardKeyFor(term)];

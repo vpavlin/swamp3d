@@ -328,8 +328,8 @@ Item {
                             text: !root.globalInfo ? "No index yet - an indexing hub publishes one every half hour or so." :
                                   "From the index by " + root.globalInfo.indexerName + ", " + Math.round(root.globalInfo.ageMs / 60000) + " min old, " +
                                   root.plural(root.globalInfo.models, "model", "models") + "  ·  " + root.globalInfo.agreeing + " of " + root.plural(root.globalInfo.indexers, "indexer", "indexers") + " agree" +
-                                  (root.globalInfo.privacyDowngrades ? "  ·  " + root.globalInfo.privacyDowngrades + " fetches fell back to non-private" : "") }
-                        T2 { visible: root.globalPending; text: "Fetching the part of the index this search needs (privately)..." }
+                                  (root.globalInfo.private ? (root.globalInfo.privacyDowngrades ? "  ·  " + root.globalInfo.privacyDowngrades + " fetches fell back to non-private" : "  ·  fetched privately") : "  ·  not private yet: the storage network's mixnet isn't working, so the hub serving the index can see which piece you fetched") }
+                        T2 { visible: root.globalPending; text: "Fetching the part of the index this search needs..." }
                         T2 { visible: !root.globalPending && !!root.globalInfo && root.globalOthers.length === 0; text: "No other matches." }
                         GridLayout {
                             Layout.fillWidth: true
@@ -569,6 +569,17 @@ Item {
                         RowLayout { spacing: root.spS
                             LogosButton { text: "Follow all"; onClicked: root.act("setCategories", [JSON.stringify(["all"])], "") }
                             LogosButton { text: "Only mine"; onClicked: root.act("setCategories", [JSON.stringify([])], "") } }
+                    }
+                    Card {
+                        T1 { text: "Search indexes" }
+                        T2 { Layout.fillWidth: true; text: root.st.index ? root.plural(root.st.index.known || 0, "index", "indexes") + " known. Your node checks that each one includes your own models; one that leaves something out without saying so loses your trust." : "" }
+                        Repeater { model: root.st.index ? root.st.index.omissions : []
+                            delegate: T2 { Layout.fillWidth: true; color: root.cErr
+                                text: "Caught: " + modelData.indexerName + " left out your \"" + modelData.title + "\" without declaring it. Your searches no longer prefer this index." } }
+                        Repeater { model: root.st.index ? root.st.index.excludedMine : []
+                            delegate: T2 { Layout.fillWidth: true; color: root.cWarn
+                                text: modelData.indexerName + " declines to carry your \"" + modelData.title + "\"" + (modelData.why ? ": " + modelData.why : "") + ". That's its published policy; other indexes still carry it." } }
+                        T3 { visible: !!root.st.index && root.st.index.omissions.length === 0 && root.st.index.excludedMine.length === 0; text: "No problems found." }
                     }
                     Card {
                         T1 { text: "This node" }

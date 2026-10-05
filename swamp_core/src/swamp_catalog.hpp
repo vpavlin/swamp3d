@@ -146,6 +146,10 @@ inline bool validManifest(const json& p) {
         if (!isHex(str(it.value(), "sha256"), 64) || num(it.value(), "size") <= 0 || num(it.value(), "size") > 256LL * 1024 * 1024) return false;
         if (str(it.value(), "cid").empty() || str(it.value(), "cid").size() > 128) return false;
     }
+    if (p.contains("excluded")) {
+        if (!p["excluded"].is_array() || p["excluded"].size() > 200) return false;
+        for (const auto& x : p["excluded"]) if (!x.is_object() || !isHex(str(x, "m"), 32) || str(x, "why").size() > 140) return false;
+    }
     return true;
 }
 
@@ -209,7 +213,7 @@ inline Catalog fold(const std::vector<Event>& log, bool admitted = false) {
             c.profiles[who] = json{{"name", clip(p, "name", 60)}, {"bio", clip(p, "bio", 500)}};
         } else if (e.type == "index.manifest") {
             if (!validManifest(p)) { c.rejected++; continue; }
-            json mf = p; mf["indexer"] = who; mf["published"] = t;
+            json mf = p; mf["indexer"] = who; mf["published"] = t; mf["eventId"] = e.id;
             c.indexes[who] = mf;   // events fold in HLC order: the newest manifest wins
         } else if (e.type == "model.create") {
             std::string id = str(p, "modelId"), nonce = str(p, "nonce");

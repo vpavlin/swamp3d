@@ -1,6 +1,6 @@
 # 0016. Optional anonymous query hubs, kept honest by redundancy, audits and declared exclusions
 
-- Status: Accepted (design; not built yet)
+- Status: Accepted. Built in 0.4.0: declared exclusion lists, creator inclusion checks with signed omission evidence, indexer choice that avoids caught indexers. Not built yet: live query hubs, audits with known-answer queries, shared reports
 - Date: 2026-10-05
 
 ## Context

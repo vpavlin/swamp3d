@@ -45,6 +45,8 @@ int main(int argc, char** argv) {
     fs::remove_all(root);
     setenv("SWAMP_TICK_MS", "60", 1);
     setenv("SWAMP_INDEX_EVERY_MS", "1000", 1);   // the hub indexes every second here
+    setenv("SWAMP_INCLUSION_EVERY_MS", "1000", 1);   // creators audit indexers every second
+    setenv("SWAMP_INCLUSION_GRACE_MS", "0", 1);
     const std::string stl1 = repo + "/bench/data/raw/74890.stl", stl2 = repo + "/bench/data/raw/278455.stl";
 
     Peer* alice = spawn("alice");
@@ -273,6 +275,41 @@ int main(int argc, char** argv) {
         CHECK(gm["model"].value("title", "").rfind("Geometric bracelet", 0) == 0 && gm["model"]["comments"].size() >= 1 && gm["model"]["creatorName"] == "Alice",
               "...with its comments and its creator's name");
         CHECK(json::parse(tess->core.listModels("{}"))["total"].get<int>() == 2, "opened models don't join Browse (Tess still sees only her categories)");
+        tess->call(tess->core.download(found, "1"));
+        CHECK(waitFor([&] { json m = json::parse(tess->core.getModel(found))["model"]; return m["versions"][0].value("download", json::object()).value("status", "") == "done"; }, 15000),
+              "...and she can download a model she found through the index");
+        // ADR 0016: a declared exclusion is a policy; a silent omission is caught by the creator
+        {
+            std::string toyId = toy.value("modelId", ""), toolId = tool.value("modelId", "");
+            fs::create_directories(root + "/policy/data");
+            { std::ofstream f(root + "/policy/data/exclusions.json"); f << json{{toolId, "we only carry toys"}}.dump(); }
+            setenv("SWAMP_INDEXER", "1", 1);
+            Peer* policy = spawn("policy");
+            setenv("SWAMP_TEST_OMIT", toyId.c_str(), 1);
+            Peer* rogue = spawn("rogue");
+            pump(1300);
+            unsetenv("SWAMP_TEST_OMIT"); unsetenv("SWAMP_INDEXER");
+            policy->call(policy->core.setProfile(json{{"name", "Policy hub"}}.dump()));
+            rogue->call(rogue->core.setProfile(json{{"name", "Rogue hub"}}.dump()));
+            policy->call(policy->core.resync()); rogue->call(rogue->core.resync());
+            std::string rogueAddr = rogue->snap()["me"]["address"];
+            CHECK(waitFor([&] { return alice->snap()["index"]["known"].get<int>() >= 3; }, 15000), "Alice sees three indexers' manifests");
+            CHECK(waitFor([&] {
+                for (const auto& o : json(alice->snap()["index"]["omissions"])) if (o["indexer"] == rogueAddr && o["modelId"] == toyId) return true;
+                return false; }, 40000), "Alice's node catches the rogue indexer leaving out her model (signed evidence)");
+            json ev;
+            for (const auto& o : json(alice->snap()["index"]["omissions"])) if (o["indexer"] == rogueAddr) ev = o;
+            CHECK(ev.is_object() && ev.value("manifestEvent", "").size() > 0 && (ev.value("shardSha256", "").size() == 64 || ev.value("shardMissing", false)),
+                  "the evidence names the signed manifest and the shard (or that the manifest has no such shard)");
+            bool policyNotBlamed = true;
+            for (const auto& o : json(alice->snap()["index"]["omissions"])) if (o["indexer"] == policy->snap()["me"]["address"]) policyNotBlamed = false;
+            CHECK(policyNotBlamed, "the policy hub's declared exclusion is not counted as an omission");
+            CHECK(waitFor([&] {
+                for (const auto& x : json(alice->snap()["index"]["excludedMine"])) if (x["modelId"] == toolId && x["why"] == "we only carry toys") return true;
+                return false; }, 40000), "...and Alice is told which hub excludes her model, and why");
+            json gsA = json::parse(alice->core.globalSearch(json{{"q", "spinning"}}.dump()));
+            CHECK(gsA["index"]["indexer"] != rogueAddr, "Alice's searches no longer use the rogue indexer");
+        }
         (void)toy; (void)tool;
     }
 
