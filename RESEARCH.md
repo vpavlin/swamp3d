@@ -83,7 +83,11 @@ same as on every platform today.
 | payments & payouts | LEZ tokens only; no fiat, no off-ramp; tips first, sales second |
 | cold start | import from Printables/Thingiverse/Manyfold by the creator (their own models), keeping the original date as external evidence |
 
-## 6. Open questions
+## 6. Decided (2026-10-05)
+
+Basecamp 0.3; LEZ for anchoring (and tips); free models with tips first; name Swamp.
+
+## 7. Open questions
 
 1. **Which UI target**: Basecamp 0.2 (what you run) or 0.3 (host-owned Storage, logosctl)? The 0.3
    port changes Storage config ownership (the app can't set the TTL); pinning hubs could stay on 0.2

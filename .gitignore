@@ -1,0 +1,5 @@
+.venv/
+node_modules/
+bench/data/
+bench/results/fps.json
+bench/results/verify-*.json

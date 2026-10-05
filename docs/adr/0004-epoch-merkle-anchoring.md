@@ -1,6 +1,6 @@
 # 0004. Publications are anchored as one Merkle root per epoch
 
-- Status: Proposed
+- Status: Accepted (2026-10-05: anchor target = LEZ registry program)
 - Date: 2026-10-05
 
 ## Context

@@ -1,6 +1,6 @@
 # 0007. Free models and tips first; paid models in phase 2
 
-- Status: Proposed
+- Status: Accepted (2026-10-05)
 - Date: 2026-10-05
 
 ## Context

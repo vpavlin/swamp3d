@@ -1,6 +1,6 @@
 # 0008. Basecamp core module + pure-QML view; thumbnails and slicer handoff before a 3D viewer
 
-- Status: Proposed
+- Status: Accepted (2026-10-05: target Basecamp 0.3)
 - Date: 2026-10-05
 
 ## Context

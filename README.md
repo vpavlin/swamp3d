@@ -1,4 +1,6 @@
-# Research: a decentralized place to share 3D models (working name: Spool)
+# Swamp (working name: "Swamp Dimension")
+
+A decentralized place to share 3D models.
 
 > Status: **research**, started 2026-10-05. Nothing is built yet. Not endorsed by or affiliated with
 > Logos; built on the Logos tech stack.
@@ -27,6 +29,14 @@ and without deleting anything.
 7. [docs/THEFT.md](docs/THEFT.md) - the design for flagging stolen models.
 8. [docs/adr/](docs/adr/) - proposed decisions.
 
-## Name candidates
+## Decisions so far (vpavlin, 2026-10-05)
 
-Spool (filament spool; also a print queue) · Plinth (what a model stands on) · Filament Commons.
+- Name: **Swamp** ("Swamp Dimension").
+- UI target: **Basecamp 0.3**.
+- Anchoring: **LEZ** (a registry program; Bedrock inscriptions not pursued for now).
+- Scope: **free models with tips** first; paid models later.
+- Repo stays **local** for now.
+
+## Proof of concept
+
+See docs/POC.md. Step 1 (fingerprint benchmark) is under way: packages/fp, bench/.
