@@ -43,6 +43,7 @@ public:
         if (m == "like") return core->like(s(0), s(1));
         if (m == "setProfile") return core->setProfile(s(0));
         if (m == "setCategories") return core->setCategories(s(0));
+        if (m == "globalSearch") return core->globalSearch(s(0));
         return "{\"error\":\"Invalid response\"}";
     }
     Q_INVOKABLE void callModuleAsync(const QString& mod, const QString& method, const QVariantList& args, const QJSValue& cb, int) {
@@ -88,11 +89,15 @@ static void pump(int ms) { QElapsedTimer t; t.start(); while (t.elapsed() < ms) 
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen"); qputenv("QT_QUICK_BACKEND", "software");
     setenv("SWAMP_TICK_MS", "100", 1);
+    setenv("SWAMP_INDEX_EVERY_MS", "1000", 1);
     QGuiApplication app(argc, argv);
     qInstallMessageHandler(handler);
     std::string qml = argv[1], out = argv[2], repo = argv[3], root = out + "/data";
     std::filesystem::remove_all(root);
-    Peer* me = spawn(root, "me"); Peer* friend_ = spawn(root, "friend");
+    Peer* me = spawn(root, "me");
+    setenv("SWAMP_INDEXER", "1", 1);   // the friend's node publishes the search index
+    Peer* friend_ = spawn(root, "friend");
+    unsetenv("SWAMP_INDEXER");
     pump(1500);
     friend_->core.setProfile(json{{"name", "Lizard Lab"}}.dump());
     me->core.setProfile(json{{"name", "Swamp Thing"}, {"bio", "I print ducks"}}.dump());
@@ -107,7 +112,8 @@ int main(int argc, char** argv) {
     std::string mid = a["modelId"];
     me->core.comment(mid, "Printed this in silk PLA, looks great");
     me->core.like(mid, "true");
-    pump(1500);
+    me->core.setCategories("[\"household\"]");   // follow one category; find the rest through the index
+    pump(4000);
 
     QQuickView view; view.setResizeMode(QQuickView::SizeRootObjectToView); view.resize(1280, 900);
     Sandbox sandbox;
@@ -124,6 +130,11 @@ int main(int argc, char** argv) {
     auto shot = [&](const char* n) { pump(1500); view.grabWindow().save(QString::fromStdString(out + "/swamp-" + n + ".png")); fprintf(stderr, "SHOT %s\n", n); };
     pump(5000);   // pictures are lazy: the view asks, the core fetches, the view asks again
     shot("browse");
+    r->setProperty("query", "bracelet");
+    QMetaObject::invokeMethod(r, "refresh");
+    pump(9000);   // the term shard, then the result's thumbnail
+    shot("search");
+    r->setProperty("query", "");
     QMetaObject::invokeMethod(r, "openModel", Q_ARG(QVariant, QString::fromStdString(mid)));
     shot("model");
     r->setProperty("openId", ""); r->setProperty("tab", "publish"); shot("publish");

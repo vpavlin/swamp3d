@@ -2,6 +2,7 @@
 #include "logos_sdk.h"
 #include "logos_sync/catchup.hpp"
 #include "swamp_fp.hpp"
+#include "swamp_index.hpp"
 #define SWAMP_THUMB_QT 1   // the module links Qt Core: compress thumbnails with qCompress
 #include "swamp_thumb.hpp"
 #include <QTimer>
@@ -20,7 +21,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.2.0";
+static const char* SWAMP_VERSION = "0.3.0";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -46,6 +47,7 @@ static constexpr int kHubConcurrency = 3;
 static constexpr long long kImageMaxBytes = 16 * 1024 * 1024;
 static constexpr size_t kImageCacheFiles = 300;
 static constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
+static constexpr int kPrivateRounds = 2;            // failed private (Mix) rounds before a shard fetch goes plain
 static constexpr int kJobRounds = 3;                 // full passes over a file's CIDs before a download fails
 
 // ---- helpers --------------------------------------------------------------------------------
@@ -161,6 +163,9 @@ void SwampCoreImpl::setupDataDir() {
     if (ec) fprintf(stderr, "[swamp] cannot create %s: %s\n", m_dataDir.c_str(), ec.message().c_str());
     const char* hub = getenv("SWAMP_HUB");
     m_hub = hub && (std::string(hub) == "1" || std::string(hub) == "true");
+    const char* ix = getenv("SWAMP_INDEXER");
+    m_indexer = m_hub || (ix && (std::string(ix) == "1" || std::string(ix) == "true"));
+    if (const char* ev = getenv("SWAMP_INDEX_EVERY_MS")) m_indexEveryMs = std::max(1000LL, atoll(ev));
 }
 std::string SwampCoreImpl::blobPath(const std::string& sha) const { return m_dataDir + "/files/" + sha; }
 bool SwampCoreImpl::haveBlob(const std::string& sha) const { std::error_code ec; return fs::exists(blobPath(sha), ec); }
@@ -618,7 +623,9 @@ void SwampCoreImpl::completeUpload(const std::string& payload) {
 // the app closed mid-upload).
 void SwampCoreImpl::retryUploads() {
     long long now = nowMs();
-    for (const auto& sha : myBlobs()) {
+    std::set<std::string> mine = myBlobs();
+    mine.insert(m_indexShas.begin(), m_indexShas.end());
+    for (const auto& sha : mine) {
         if (m_myCids.count(sha)) continue;
         auto t = m_upTried.find(sha);
         if (t != m_upTried.end() && now - t->second < kUploadRetryMs) continue;
@@ -692,24 +699,36 @@ static bool sha256File(const std::string& path, std::string& hex) {
 // Fetch one blob into the local cache: try its candidate CIDs in turn, verify the hash, back off
 // between full rounds. `size` is the size the signed version declares; a transfer that grows past
 // it is cut off.
+// Where a blob can be fetched from: CIDs the catalogue announced, else CIDs an index named (a
+// search result's thumbnail, a shard). The bytes are verified against the hash either way.
+std::vector<std::string> SwampCoreImpl::cidsFor(const std::string& sha) {
+    auto it = m_cat.cids.find(sha);
+    if (it != m_cat.cids.end() && !it->second.empty()) return it->second;
+    auto x = m_extraCids.find(sha);
+    return x == m_extraCids.end() ? std::vector<std::string>() : x->second;
+}
+
 void SwampCoreImpl::startFetch(const std::string& sha, long long size) {
     if (haveBlob(sha) || size <= 0 || size > MAX_FILE_BYTES) return;
-    auto it = m_cat.cids.find(sha);
-    if (it == m_cat.cids.end() || it->second.empty()) return;
+    std::vector<std::string> cands = cidsFor(sha);
+    const std::vector<std::string>* itv = &cands;
+    if (cands.empty()) return;
     Fetch& F = m_fetch[sha];
     long long now = nowMs();
     if (F.inflight || F.gaveUp || now < F.nextTry) return;
     int inflight = 0;
     for (const auto& [s, f] : m_fetch) inflight += f.inflight;
     if (inflight >= kMaxFetches || !storageFree()) return;
-    if (F.cidIdx >= it->second.size()) F.cidIdx = 0;
-    std::string cid = it->second[F.cidIdx];
+    if (F.cidIdx >= itv->size()) F.cidIdx = 0;
+    std::string cid = (*itv)[F.cidIdx];
+    // index shards are fetched over Mix and not re-advertised: nobody learns what you searched for
+    bool priv = m_privateFetch.count(sha) > 0;
     std::string part = m_dataDir + "/parts/" + sha;
     std::error_code ec; fs::remove(part, ec);
     F.inflight = true; F.since = now; F.size = size; F.cid = cid; F.session.clear(); F.seenSize = 0; F.grewAt = now;
     long long attempt = now;
     try {
-        modules().storage_module.downloadToUrlAsyncResult(cid, part, false, 65536, false, true,
+        modules().storage_module.downloadToUrlAsyncResult(cid, part, false, 65536, priv, !priv,
             [this, life = m_life, sha, attempt](logos::AsyncResult<StdLogosResult> ar) {
                 if (*life) onLoop([this, ar, sha, attempt] {
                     std::lock_guard<std::recursive_mutex> lk(m_mtx);
@@ -736,8 +755,9 @@ void SwampCoreImpl::fetchFailed(const std::string& sha, const std::string& why) 
     std::error_code ec; fs::remove(m_dataDir + "/parts/" + sha, ec);
     F.inflight = false; F.session.clear(); F.error = why;
     fprintf(stderr, "[swamp] fetch %s: %s\n", sha.substr(0, 12).c_str(), why.c_str());
-    auto it = m_cat.cids.find(sha);
-    size_t n = it == m_cat.cids.end() ? 0 : it->second.size();
+    size_t n = cidsFor(sha).size();
+    // a private (Mix) fetch that keeps failing falls back to a plain one, and says so
+    if (m_privateFetch.count(sha) && F.rounds >= kPrivateRounds - 1 && F.cidIdx + 1 >= n) { m_privateFetch.erase(sha); m_privacyDowngrades++; }
     if (++F.cidIdx >= n) { F.cidIdx = 0; F.rounds++; F.nextTry = nowMs() + backoffMs(F.rounds); }
     else F.nextTry = 0;   // another candidate: try it straight away
 }
@@ -864,7 +884,8 @@ long long SwampCoreImpl::imageSize(const std::string& sha) {
         for (const auto& v : m.versions) for (const auto& im : arr(v, "images")) if (str(im, "sha256") == sha) return num(im, "size");
         for (const auto& mk : m.makes) for (const auto& im : arr(mk, "images")) if (str(im, "sha256") == sha) return num(im, "size");
     }
-    return 0;
+    auto x = m_extraImg.find(sha);
+    return x == m_extraImg.end() ? 0 : x->second;
 }
 
 // Pictures the view asked for in the last few minutes (cacheImage), small ones only.
@@ -878,7 +899,7 @@ void SwampCoreImpl::fetchPreviews() {
         ++it;
         if (inflight >= kPreviewFetches) continue;
         long long size = imageSize(sha);
-        if (size <= 0 || size > kPreviewMaxBytes || !m_cat.cids.count(sha)) continue;
+        if (size <= 0 || size > kPreviewMaxBytes || cidsFor(sha).empty()) continue;
         auto fi = m_fetch.find(sha);
         if (fi != m_fetch.end() && (fi->second.inflight || now < fi->second.nextTry)) continue;
         startFetch(sha, size);
@@ -930,6 +951,7 @@ void SwampCoreImpl::tick() {
             if (!jobWaiting()) { fetchPreviews(); hubSweep(); }
         }
         flushAnnouncements();
+        indexTick();
         if (m_ready && now - m_lastCatchup > kCatchupEveryMs) catchupRound();
     } catch (const std::exception& e) {
         fprintf(stderr, "[swamp] tick: %s\n", e.what());
@@ -972,6 +994,7 @@ std::string SwampCoreImpl::snapshot() {
     return json{{"ok", true}, {"version", SWAMP_VERSION}, {"status", m_status}, {"hub", m_hub},
                 {"me", {{"address", m_id.address}, {"profile", profile}}},
                 {"categories", categoriesJson()},
+                {"index", {{"indexer", m_indexer}, {"built", m_indexesBuilt}, {"known", m_cat.indexes.size()}, {"privacyDowngrades", m_privacyDowngrades}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
                 {"catalog", {{"events", m_log.size()}, {"models", visible}, {"rejected", m_cat.rejected}, {"cids", m_cat.cids.size()}}},
                 {"counters", {{"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
@@ -998,6 +1021,7 @@ std::string SwampCoreImpl::listModels(std::string queryJson) {
         if (m.versions.empty()) continue;
         if (mineOnly && m.creator != m_id.address) continue;
         if (m.retracted && !mineOnly) continue;   // your own retracted models stay visible to you
+        if (!mineOnly && m.creator != m_id.address && !m_subs.count(m.category)) continue;   // opened from search, not followed
         if (!catFilter.empty() && m.category != catFilter) continue;
         if (matches(m, text, tag)) hits.push_back(&m);
     }
@@ -1023,7 +1047,15 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     modelId = unquote(modelId);
     auto it = m_cat.models.find(modelId);
-    if (it == m_cat.models.end() || it->second.versions.empty()) return fail("No such model (it may not have synced yet)");
+    if (it == m_cat.models.end() || it->second.versions.empty()) {
+        bool pending = false;
+        if (!fetchRecord(modelId, pending)) {
+            if (pending) return json{{"ok", false}, {"pending", true}, {"error", "Fetching this model from the index..."}}.dump();
+            return fail("No such model (it may not have synced yet)");
+        }
+        it = m_cat.models.find(modelId);
+        if (it == m_cat.models.end() || it->second.versions.empty()) return fail("No such model");
+    }
     const Model& m = it->second;
     json versions = json::array();
     for (const auto& v : m.versions) {
@@ -1124,6 +1156,147 @@ std::string SwampCoreImpl::cacheImage(std::string sha, std::string viewDir) {
         if (ec) return fail("Couldn't write the picture cache: " + ec.message());
     }
     return ok(json{{"path", out}});
+}
+
+// ---- global search (ADR 0015) ----------------------------------------------------------------
+// INDEXER (a hub, or SWAMP_INDEXER=1): every epoch in which the catalogue changed, build the
+// shards, store them like any blob (file name = sha256, so identical shards get identical CIDs on
+// every indexer), upload, and once every shard has a CID publish a signed index.manifest.
+void SwampCoreImpl::indexTick() {
+    long long now = nowMs();
+    if (!m_indexer || !m_ready) return;
+    if (!m_indexPending.is_null()) {
+        json shards = json::object();
+        for (auto it = m_indexPending["shards"].begin(); it != m_indexPending["shards"].end(); ++it) {
+            std::string sha = str(it.value(), "sha256");
+            auto c = m_myCids.find(sha);
+            if (c == m_myCids.end()) return;   // still uploading
+            shards[it.key()] = {{"sha256", sha}, {"size", num(it.value(), "size")}, {"cid", c->second}};
+        }
+        json mf{{"v", index::VERSION}, {"epoch", num(m_indexPending, "epoch")}, {"root", str(m_indexPending, "root")},
+                {"models", num(m_indexPending, "models")}, {"shards", shards}};
+        author("index.manifest", mf);
+        m_indexesBuilt++;
+        m_indexPending = nullptr;
+        return;
+    }
+    // the catalogue this index covers - manifests excluded, or publishing one would trigger the next
+    std::vector<Event> content;
+    for (const auto& e : m_log) if (e.type != "index.manifest") content.push_back(e);
+    std::string root = logos_sync::catchup::fpOf(logos_sync::catchup::sortedIds(content));
+    if (root == m_indexRoot || now - m_lastIndex < m_indexEveryMs) return;
+    int visibleModels = 0;
+    for (const auto& [id, m] : m_cat.models) visibleModels += !m.versions.empty() && !m.retracted;
+    if (visibleModels == 0) return;
+    m_lastIndex = now;
+    m_indexRoot = root;
+    auto shards = index::build(m_cat, content);
+    json pend{{"epoch", now / 1000}, {"root", root}, {"models", 0}, {"shards", json::object()}};
+    int models = 0;
+    for (const auto& [id, m] : m_cat.models) models += !m.versions.empty() && !m.retracted;
+    pend["models"] = models;
+    m_indexShas.clear();
+    for (const auto& [key, sh] : shards) {
+        std::string bytes = sh.dump();
+        std::string sha = storeBlob(bytes);
+        pend["shards"][key] = {{"sha256", sha}, {"size", (long long)bytes.size()}};
+        m_indexShas.insert(sha);
+        uploadBlob(sha);
+    }
+    m_indexPending = pend;
+    fprintf(stderr, "[swamp] index: %d models, %zu shards, epoch %lld\n", models, shards.size(), (long long)(now / 1000));
+}
+
+// CLIENT: the manifest to search - the newest one, from any indexer. How many indexers agree with
+// it (same catalogue root, same shard hashes) is reported with every answer (ADR 0016 builds on it).
+json SwampCoreImpl::bestManifest() {
+    json best;
+    for (const auto& [who, mf] : m_cat.indexes)
+        if (best.is_null() || num(mf, "published") > num(best, "published")) best = mf;
+    return best;
+}
+// A shard the manifest names: parsed if we hold it, else queued for a private fetch (null).
+json SwampCoreImpl::shard(const json& mf, const std::string& key) {
+    if (!mf.contains("shards") || !mf["shards"].contains(key)) return json::object();   // no such shard = no matches
+    const json& ref = mf["shards"][key];
+    std::string sha = str(ref, "sha256");
+    auto c = m_shardCache.find(sha);
+    if (c != m_shardCache.end()) return c->second;
+    if (haveBlob(sha)) {
+        std::string bytes;
+        json j = readFile(blobPath(sha), bytes) ? json::parse(bytes, nullptr, false) : json();
+        if (j.is_object()) { if (m_shardCache.size() > 64) m_shardCache.clear(); m_shardCache[sha] = j; return j; }
+        return json::object();
+    }
+    m_extraCids[sha] = {str(ref, "cid")};
+    m_privateFetch.insert(sha);
+    startFetch(sha, num(ref, "size"));
+    return nullptr;
+}
+
+std::string SwampCoreImpl::globalSearch(std::string queryJson) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json q = parseArg(queryJson);
+    if (!q.is_object()) q = json::object();
+    json mf = bestManifest();
+    if (mf.is_null()) return ok(json{{"results", json::array()}, {"pending", false}, {"index", nullptr}});
+    std::map<std::string, json> terms;
+    bool pending = false;
+    for (const auto& w : index::words(str(q, "q"))) {
+        std::string key = index::shardKeyFor(w);
+        if (terms.count(key)) continue;
+        json sh = shard(mf, key);
+        if (sh.is_null()) pending = true; else terms[key] = sh;
+    }
+    json results = json::array();
+    if (!pending) {
+        size_t limit = (size_t)std::max<long long>(1, std::min<long long>(200, num(q, "limit", 50)));
+        for (auto e : index::search(str(q, "q"), terms, str(q, "category"), limit)) {
+            std::string mid = str(e, "m");
+            bool held = m_cat.models.count(mid) && !m_cat.models[mid].versions.empty();
+            // remote thumbnails go through the same lazy, verified picture path
+            if (e.contains("th") && e["th"].is_object()) {
+                std::string sha = str(e["th"], "sha");
+                if (isHex(sha, 64)) {
+                    m_extraImg[sha] = num(e["th"], "size");
+                    std::vector<std::string> cids;
+                    for (const auto& c : arr(e["th"], "cids")) if (c.is_string()) cids.push_back(c.get<std::string>());
+                    if (!cids.empty() && !m_cat.cids.count(sha)) m_extraCids[sha] = cids;
+                }
+            }
+            results.push_back(json{{"modelId", mid}, {"title", str(e, "t")}, {"summary", str(e, "s")}, {"creator", str(e, "a")},
+                                   {"creatorName", str(e, "n").empty() ? str(e, "a").substr(0, 10) : str(e, "n")}, {"latest", num(e, "v")},
+                                   {"licence", str(e, "l")}, {"category", str(e, "c")}, {"likes", num(e, "k")}, {"makes", num(e, "mk")},
+                                   {"thumb", nullptr}, {"thumbSha", e.contains("th") && e["th"].is_object() ? str(e["th"], "sha") : ""},
+                                   {"remix", e.value("remix", false)}, {"held", held}});
+        }
+    }
+    int agree = 0;
+    for (const auto& [who, other] : m_cat.indexes) agree += str(other, "root") == str(mf, "root") && other["shards"] == mf["shards"];
+    return ok(json{{"results", results}, {"pending", pending},
+                   {"index", {{"indexer", str(mf, "indexer")}, {"indexerName", nameOf(str(mf, "indexer"))}, {"models", num(mf, "models")},
+                              {"ageMs", nowMs() - num(mf, "published")}, {"indexers", m_cat.indexes.size()}, {"agreeing", agree},
+                              {"privacyDowngrades", m_privacyDowngrades}}}});
+}
+
+// Opening a model you don't follow: take its events from the index's record shard - only that
+// model's, plus its authors' profiles - and fold them in. Every event is signature-checked.
+bool SwampCoreImpl::fetchRecord(const std::string& modelId, bool& pending) {
+    pending = false;
+    json mf = bestManifest();
+    if (mf.is_null() || !isHex(modelId, 32)) return false;
+    json sh = shard(mf, index::recordKeyFor(modelId));
+    if (sh.is_null()) { pending = true; return false; }
+    std::vector<Event> evs;
+    std::set<std::string> authors;
+    for (const auto& j : arr(sh, "events")) { Event e; if (eventFrom(j, e)) evs.push_back(e); }
+    Catalog bucket = fold(evs);
+    bool any = false;
+    for (const auto& e : evs)
+        if (e.type != "profile.put" && index::modelOfEvent(e, bucket) == modelId) { authors.insert(e.dev); any |= ingest(e); }
+    for (const auto& e : evs) if (e.type == "profile.put" && authors.count(e.dev)) ingest(e);
+    if (any) refold();
+    return m_cat.models.count(modelId) > 0;
 }
 
 // ---- creators -------------------------------------------------------------------------------

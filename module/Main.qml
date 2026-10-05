@@ -35,7 +35,13 @@ Item {
     property int total: 0
     property string query: ""
     property string tagFilter: ""
-    property string catFilter: ""     // Browse: one category, or all of yours
+    property string catFilter: ""
+    property string modelNote: ""
+    property var globalRes: []
+    property var globalInfo: null
+    property bool globalPending: false
+    // index results you don't already see in your own categories
+    readonly property var globalOthers: root.globalRes.filter(function (r) { for (var i = 0; i < root.models.length; i++) if (root.models[i].modelId === r.modelId) return false; return true })     // Browse: one category, or all of yours
     property string sortBy: "new"
     property var model: null          // the open model page
     property string openId: ""
@@ -86,13 +92,18 @@ Item {
         if (root.busy) { root.again = true; return }
         root.busy = true
         busyGuard.restart()
-        var pending = 2 + (root.openId ? 1 : 0)
+        var global = root.tab === "browse" && !root.openId && !!root.query
+        var pending = 2 + (root.openId ? 1 : 0) + (global ? 1 : 0)
         var fin = function () { if (--pending > 0) return; root.busy = false; if (root.again) { root.again = false; root.refresh() } }
         root.core("snapshot", [], function (raw) { var s = root.parse(raw); if (s && s.ok) root.st = s; fin() })
         root.core("listModels", [JSON.stringify({ q: root.query, tag: root.tagFilter, category: root.catFilter, sort: root.sortBy, mine: root.tab === "mine", limit: 200 })], function (raw) {
             var r = root.parse(raw); if (r && r.ok) { root.models = r.models; root.tags = r.tags; root.total = r.total } fin()
         })
-        if (root.openId) root.core("getModel", [root.openId], function (raw) { var r = root.parse(raw); if (r && r.ok) root.model = r.model; fin() })
+        if (global) root.core("globalSearch", [JSON.stringify({ q: root.query, category: root.catFilter, limit: 60 })], function (raw) {
+            var r = root.parse(raw); if (r && r.ok) { root.globalRes = r.results; root.globalInfo = r.index; root.globalPending = r.pending } fin()
+        })
+        if (!root.query) { root.globalRes = []; root.globalPending = false }
+        if (root.openId) root.core("getModel", [root.openId], function (raw) { var r = root.parse(raw); if (r && r.ok) { root.model = r.model; root.modelNote = "" } else if (r) root.modelNote = r.error || ""; fin() })
     }
     Timer { id: busyGuard; interval: 45000; onTriggered: root.busy = false }
     Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
@@ -195,6 +206,19 @@ Item {
         color: root.cText; placeholderTextColor: root.cText3; font.pixelSize: 13; wrapMode: TextEdit.Wrap
         background: Rectangle { color: root.cInset; radius: root.rad; border.color: parent.activeFocus ? root.cPrimary : root.cLine }
     }
+    component ModelCard: Rectangle {
+        property var m: ({})
+        Layout.fillWidth: true; Layout.maximumWidth: 420; Layout.preferredHeight: 300
+        color: root.cCard; radius: root.rad + 4; border.color: hov.containsMouse ? root.cPrimary : root.cLine
+        ColumnLayout {
+            anchors.fill: parent; anchors.margins: root.spS; spacing: 4
+            Thumb { Layout.fillWidth: true; Layout.preferredHeight: 190; path: m.thumb || m.thumbSha || "" }
+            T1 { Layout.fillWidth: true; text: m.title || ""; font.pixelSize: 14; elide: Text.ElideRight; maximumLineCount: 2 }
+            T3 { Layout.fillWidth: true; text: "by " + m.creatorName + "  ·  " + root.catLabel(m.category) + "  ·  " + m.licence + (m.remix ? "  ·  remix" : "") + (m.retracted ? "  ·  retracted" : "") }
+            T3 { Layout.fillWidth: true; text: root.plural(m.likes || 0, "like", "likes") + "  ·  " + root.plural(m.makes || 0, "make", "makes") + "  ·  v" + m.latest }
+        }
+        MouseArea { id: hov; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.openModel(m.modelId) }
+    }
     component Thumb: Rectangle {
         property string path: ""
         color: root.cInset; radius: root.rad; clip: true
@@ -289,21 +313,31 @@ Item {
                         columnSpacing: root.sp; rowSpacing: root.sp
                         Repeater {
                             model: root.models
-                            delegate: Rectangle {
-                                Layout.fillWidth: true; Layout.preferredHeight: 300
-                                color: root.cCard; radius: root.rad + 4; border.color: hov.containsMouse ? root.cPrimary : root.cLine
-                                ColumnLayout {
-                                    anchors.fill: parent; anchors.margins: root.spS; spacing: 4
-                                    Thumb { Layout.fillWidth: true; Layout.preferredHeight: 190; path: modelData.thumb || modelData.thumbSha || "" }
-                                    T1 { Layout.fillWidth: true; text: modelData.title; font.pixelSize: 14; elide: Text.ElideRight; maximumLineCount: 2 }
-                                    T3 { Layout.fillWidth: true; text: "by " + modelData.creatorName + "  ·  " + root.catLabel(modelData.category) + "  ·  " + modelData.licence + (modelData.remix ? "  ·  remix" : "") + (modelData.retracted ? "  ·  retracted" : "") }
-                                    T3 { Layout.fillWidth: true; text: root.plural(modelData.likes, "like", "likes") + "  ·  " + root.plural(modelData.makes, "make", "makes") + "  ·  v" + modelData.latest }
-                                }
-                                MouseArea { id: hov; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.openModel(modelData.modelId) }
-                            }
+                            delegate: ModelCard { m: modelData }
                         }
                     }
-                    T2 { visible: root.models.length === 0; text: root.tab === "mine" ? "You haven't published anything yet. Publish your first model." : "Nothing here yet. The catalogue fills in as it syncs from other people, or publish the first model." }
+                    T2 { visible: root.models.length === 0 && !root.query; text: root.tab === "mine" ? "You haven't published anything yet. Publish your first model." : "Nothing here yet. The catalogue fills in as it syncs from other people, or publish the first model." }
+                    T2 { visible: root.models.length === 0 && !!root.query && root.tab === "browse"; text: "Nothing in the categories you follow." }
+                    // everything else, from the newest index snapshot (ADR 0015)
+                    ColumnLayout {
+                        visible: root.tab === "browse" && !!root.query
+                        Layout.fillWidth: true; spacing: root.spS
+                        Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
+                        T1 { text: "Everywhere" }
+                        T3 { Layout.fillWidth: true
+                            text: !root.globalInfo ? "No index yet - an indexing hub publishes one every half hour or so." :
+                                  "From the index by " + root.globalInfo.indexerName + ", " + Math.round(root.globalInfo.ageMs / 60000) + " min old, " +
+                                  root.plural(root.globalInfo.models, "model", "models") + "  ·  " + root.globalInfo.agreeing + " of " + root.plural(root.globalInfo.indexers, "indexer", "indexers") + " agree" +
+                                  (root.globalInfo.privacyDowngrades ? "  ·  " + root.globalInfo.privacyDowngrades + " fetches fell back to non-private" : "") }
+                        T2 { visible: root.globalPending; text: "Fetching the part of the index this search needs (privately)..." }
+                        T2 { visible: !root.globalPending && !!root.globalInfo && root.globalOthers.length === 0; text: "No other matches." }
+                        GridLayout {
+                            Layout.fillWidth: true
+                            columns: Math.max(1, Math.floor(scroller.availableWidth / 250))
+                            columnSpacing: root.sp; rowSpacing: root.sp
+                            Repeater { model: root.globalOthers; delegate: ModelCard { m: modelData } }
+                        }
+                    }
                 }
 
                 // ════ MODEL PAGE ════
@@ -315,7 +349,7 @@ Item {
                         Layout.fillWidth: true
                         LogosButton { text: "< Back"; onClicked: { root.openId = ""; root.model = null; root.refresh() } }
                         Item { Layout.fillWidth: true }
-                        T3 { visible: !root.model; text: "loading..." }
+                        T3 { visible: !root.model; text: root.modelNote || "loading..." }
                     }
                     Card {
                         visible: !!root.model

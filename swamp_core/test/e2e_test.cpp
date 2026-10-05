@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
     root = std::string(getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") + "/swamp-e2e";
     fs::remove_all(root);
     setenv("SWAMP_TICK_MS", "60", 1);
+    setenv("SWAMP_INDEX_EVERY_MS", "1000", 1);   // the hub indexes every second here
     const std::string stl1 = repo + "/bench/data/raw/74890.stl", stl2 = repo + "/bench/data/raw/278455.stl";
 
     Peer* alice = spawn("alice");
@@ -247,6 +248,31 @@ int main(int argc, char** argv) {
         json after = json::parse(tess->core.setCategories("[\"garden\"]"));
         int toys = 0; for (const auto& c : after["categories"]) if (c["id"] == "toys") toys = c.value("subscribed", false);
         CHECK(after.value("ok", false) && toys == 1, "categories you publish in stay subscribed");
+        // global search (ADR 0015): Tess follows Tools (and now Toys), not Fashion - the hub's
+        // index still finds Alice's bracelet, and opening it pulls just that model's record
+        CHECK(waitFor([&] { return hub->snap()["index"]["built"].get<int>() >= 1; }, 8000), "the hub built and published an index");
+        CHECK(waitFor([&] { return tess->snap()["index"]["known"].get<int>() >= 1; }, 8000), "Tess received the hub's index manifest");
+        json gs;
+        bool sawPending = false;
+        CHECK(waitFor([&] {
+            gs = json::parse(tess->core.globalSearch(json{{"q", "bracelet"}}.dump()));
+            if (gs.value("pending", false)) sawPending = true;
+            return !gs.value("pending", true) && gs["results"].size() >= 1; }, 15000), "global search finds a model in a category Tess doesn't follow");
+        CHECK(sawPending, "...after fetching the term shard it needed (pending first)");
+        std::string found;
+        for (const auto& r : gs["results"]) if (r["modelId"] == mid) found = mid;
+        CHECK(!found.empty() && gs["index"]["agreeing"] == 1 && gs["index"]["indexers"] == 1, "the result names the index it came from");
+        CHECK(json::parse(tess->core.listModels(json{{"q", "bracelet"}}.dump()))["total"] == 0, "it isn't in Tess's own catalogue");
+        std::string vdirT = root + "/plugins-tess/swamp"; fs::create_directories(vdirT);
+        std::string tsha;
+        for (const auto& r : gs["results"]) if (r["modelId"] == found) tsha = r.value("thumbSha", "");
+        tess->core.cacheImage(tsha, vdirT);
+        CHECK(waitFor([&] { return json::parse(tess->core.cacheImage(tsha, vdirT)).value("ok", false); }, 8000), "a remote result's thumbnail loads (CIDs from the index, hash-verified)");
+        json gm;
+        CHECK(waitFor([&] { gm = json::parse(tess->core.getModel(found)); return gm.value("ok", false); }, 15000), "opening it fetches the model's record from the index");
+        CHECK(gm["model"].value("title", "").rfind("Geometric bracelet", 0) == 0 && gm["model"]["comments"].size() >= 1 && gm["model"]["creatorName"] == "Alice",
+              "...with its comments and its creator's name");
+        CHECK(json::parse(tess->core.listModels("{}"))["total"].get<int>() == 2, "opened models don't join Browse (Tess still sees only her categories)");
         (void)toy; (void)tool;
     }
 

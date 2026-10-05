@@ -112,6 +112,26 @@ unsigned, badly signed, or of an unknown type. Payload size limit: 16 KiB per ev
   hub fetches until it's done. Its Storage config (the host's `config.json`) needs a public `extip`,
   `autonat-server`, `relay-server` and a long `block-ttl` (logos-storage).
 
+## 4b. Index snapshots (ADR 0015)
+
+- An **indexer** (`SWAMP_HUB=1`, or `SWAMP_INDEXER=1`) rebuilds the index when the catalogue changed,
+  at most every `SWAMP_INDEX_EVERY_MS` (30 min).
+  - Manifest events don't count as changes; an empty catalogue isn't indexed.
+  - `swamp_index.hpp` builds deterministic shards: `t<c>` term shards hold normalised terms (title,
+    summary, tags, creator name) → model ids, plus those models' ~200 B entries; `r<h>` record shards
+    hold every event of the models whose id starts with `h`, plus their authors' latest profiles.
+  - Each shard is stored like a blob (file name = sha256, so identical shards get identical CIDs on
+    every indexer) and uploaded.
+  - When every shard has a CID, the indexer publishes a signed `index.manifest`
+    `{v:1, epoch, root, models, shards:{key:{sha256, size, cid}}}` on the people topic.
+- **Clients** search the newest manifest.
+  - Every query word must match a term exactly or as a prefix (AND across words); results are ranked
+    by title matches, likes, then date.
+  - Shards are fetched with `isPrivate=true, advertise=false`. After 2 failed private rounds a fetch
+    falls back to a plain one, and `privacyDowngrades` counts it.
+  - Models opened from search are folded in (only their own events) but don't appear in Browse
+    unless you follow their category.
+
 ## 5. Fold → catalogue state
 
 `models[modelId]` = `{modelId, creator, created, title (latest version), versions[], retracted,
@@ -132,6 +152,7 @@ arguments, no default arguments.
 | `download(modelId, v)` | fetch every file of that version into `~/Swamp/<title>-<modelId8>-v<v>/`; progress via `getModel` |
 | `comment(modelId, text)`, `postMake(modelId, makeJson)`, `like(modelId, on)` | community events |
 | `setProfile(profileJson)` | `{name, bio}` |
+| `globalSearch(queryJson)` | `{q, category, limit}` against the newest index snapshot (ADR 0015): returns `{results, pending, index:{indexerName, ageMs, models, indexers, agreeing, privacyDowngrades}}`; `pending:true` while the needed term shards are fetched (privately, over Mix) - ask again. Results outside your categories open via `getModel`, which fetches that model's events from the index's record shard |
 | `setCategories(listJson)` | the categories to follow: `["tools","toys"]` or `["all"]`; categories you publish in always stay. `snapshot().categories` lists `{id, label, subscribed, models}` |
 | `cacheImage(sha, viewDir)` | pictures are fetched lazily: if the node doesn't hold it yet, this returns `{ok:false, pending:true}` and fetches it (ask again in a few seconds). Otherwise: copy a picture the node holds (a listed thumbnail or photo) into `<viewDir>/cache/` and return its path. Basecamp 0.3 sandboxes views: a view may load only `qrc:` and files under its own plugin dir — no `file://` elsewhere, no `data:` URLs. `viewDir` must be a directory named `swamp`; the cache keeps ≤ 300 files |
 | `retract(modelId, reason)` | creator only |

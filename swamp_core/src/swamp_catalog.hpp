@@ -58,7 +58,7 @@ inline std::string modelIdFor(const std::string& creator, const std::string& non
 }
 
 inline bool knownType(const std::string& t) {
-    static const std::set<std::string> T = {"profile.put", "model.create", "model.version", "blob.cids", "model.retract",
+    static const std::set<std::string> T = {"index.manifest", "profile.put", "model.create", "model.version", "blob.cids", "model.retract",
                                             "comment.post", "make.post", "like.put"};
     return T.count(t) > 0;
 }
@@ -136,6 +136,19 @@ inline std::string validateVersion(const json& p) {
     return "";
 }
 
+// An index manifest (ADR 0015): {v, epoch, root, models, shards: {key: {sha256, size, cid}}}.
+inline bool validManifest(const json& p) {
+    if (!p.is_object() || num(p, "v") != 1 || num(p, "epoch") <= 0 || str(p, "root").size() > 128) return false;
+    if (!p.contains("shards") || !p["shards"].is_object() || p["shards"].size() > 128) return false;
+    for (auto it = p["shards"].begin(); it != p["shards"].end(); ++it) {
+        const std::string& k = it.key();
+        if (k.size() != 2 || (k[0] != 't' && k[0] != 'r')) return false;
+        if (!isHex(str(it.value(), "sha256"), 64) || num(it.value(), "size") <= 0 || num(it.value(), "size") > 256LL * 1024 * 1024) return false;
+        if (str(it.value(), "cid").empty() || str(it.value(), "cid").size() > 128) return false;
+    }
+    return true;
+}
+
 // ── folded state ────────────────────────────────────────────────────────────────────────────
 struct Model {
     std::string modelId, creator, category = "other";
@@ -152,7 +165,8 @@ struct Catalog {
     std::map<std::string, json> profiles;        // author -> {name, bio}
     std::map<std::string, std::vector<std::string>> cids;   // sha256 -> candidate CIDs, best first
     std::map<std::string, std::string> owner;
-    std::map<std::string, std::string> blobModel;               // sha256 -> first model listing it (topic routing)                // sha256 -> creator of the first model listing it
+    std::map<std::string, std::string> blobModel;               // sha256 -> first model listing it (topic routing)
+    std::map<std::string, json> indexes;                        // indexer address -> its latest index manifest (ADR 0015)                // sha256 -> creator of the first model listing it
     size_t events = 0, rejected = 0;
 };
 
@@ -193,6 +207,10 @@ inline Catalog fold(const std::vector<Event>& log, bool admitted = false) {
         const Event& e = *ep; const json& p = e.payload; const std::string& who = e.dev; const long long t = e.hlc.wall;
         if (e.type == "profile.put") {
             c.profiles[who] = json{{"name", clip(p, "name", 60)}, {"bio", clip(p, "bio", 500)}};
+        } else if (e.type == "index.manifest") {
+            if (!validManifest(p)) { c.rejected++; continue; }
+            json mf = p; mf["indexer"] = who; mf["published"] = t;
+            c.indexes[who] = mf;   // events fold in HLC order: the newest manifest wins
         } else if (e.type == "model.create") {
             std::string id = str(p, "modelId"), nonce = str(p, "nonce");
             if (!isHex(id, 32) || nonce.empty() || nonce.size() > 64 || modelIdFor(who, nonce) != id || c.models.count(id)) { c.rejected++; continue; }
@@ -309,7 +327,7 @@ inline Event makeEvent(Identity& id, const std::string& type, const json& payloa
 // Which topic an event belongs on, from its content (empty = not known yet: its model hasn't
 // arrived). Catch-up on a topic runs over exactly the events that map to it.
 inline std::string topicOf(const Event& e, const Catalog& c) {
-    if (e.type == "profile.put") return PEOPLE_TOPIC;
+    if (e.type == "profile.put" || e.type == "index.manifest") return PEOPLE_TOPIC;
     const json& p = e.payload;
     if (e.type == "model.create") { std::string cat = str(p, "category"); return categoryTopic(knownCategory(cat) ? cat : "other"); }
     std::string mid = str(p, "modelId");

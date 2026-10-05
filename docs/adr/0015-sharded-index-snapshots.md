@@ -1,6 +1,6 @@
 # 0015. Global search uses sharded, signed index snapshots in Logos Storage
 
-- Status: Accepted (design; not built yet)
+- Status: Accepted. Built in 0.3.0 (indexer, term + record shards, signed manifests, private shard fetch, global search, open-from-index); LEZ anchoring of the roots comes with roadmap item 5
 - Date: 2026-10-05
 
 ## Context

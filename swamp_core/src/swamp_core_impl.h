@@ -46,6 +46,9 @@ public:
     std::string setProfile(std::string profileJson);
     // categories this node mirrors (ADR 0014): a JSON array of category ids, or ["all"]
     std::string setCategories(std::string listJson);
+    // search every category through the newest index snapshot (ADR 0015): {q, category, limit};
+    // {pending:true} while the needed shards are being fetched - ask again
+    std::string globalSearch(std::string queryJson);
 
 protected:
     void onContextReady() override;
@@ -92,6 +95,11 @@ private:
     void subscribe(const std::string& cat);
     std::vector<swamp::Event> eventsOn(const std::string& topic);
     void loadSettings();
+    void indexTick();
+    swamp::json bestManifest();
+    swamp::json shard(const swamp::json& manifest, const std::string& key);
+    bool fetchRecord(const std::string& modelId, bool& pending);
+    std::vector<std::string> cidsFor(const std::string& sha);
     long long imageSize(const std::string& sha);
     swamp::json categoriesJson();
     void saveSettings();
@@ -137,7 +145,15 @@ private:
     std::map<std::string, DownloadJob> m_jobs;
     std::map<std::string, std::string> m_myCids, m_toAnnounce;
     std::set<std::string> m_subs, m_joined;
-    std::map<std::string, long long> m_wantImg;
+    std::map<std::string, long long> m_wantImg, m_extraImg;
+    std::map<std::string, std::vector<std::string>> m_extraCids;
+    std::set<std::string> m_privateFetch, m_indexShas;
+    std::map<std::string, swamp::json> m_shardCache;
+    swamp::json m_indexPending;
+    std::string m_indexRoot;
+    bool m_indexer = false;
+    long long m_lastIndex = 0, m_indexEveryMs = 30LL * 60 * 1000;
+    long m_indexesBuilt = 0, m_privacyDowngrades = 0;
     std::map<std::string, long long> m_announcedAt, m_answeredAt;
     QTimer* m_timer = nullptr;
     // one Storage request at a time: storage 3.x serves calls in turn and a download start can
