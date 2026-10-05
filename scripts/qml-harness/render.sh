@@ -9,4 +9,6 @@ DS="${SW_DS:-$HOME/basecamp-test/squashfs-root/usr/lib}"
 g++ -std=c++20 -O1 -fPIC -Wno-deprecated-declarations -I"$HDIR" -I"$ROOT/swamp_core/test/fakesdk" -I"$ROOT/swamp_core/src" \
     $(pkg-config --cflags Qt6Quick Qt6Qml Qt6Gui Qt6Core) "$HDIR/harness.cpp" "$ROOT/swamp_core/src/swamp_core_impl.cpp" \
     $(pkg-config --libs Qt6Quick Qt6Qml Qt6Gui Qt6Core) -lcrypto -o "$OUT/harness"
-QML_IMPORT_PATH="$DS" "$OUT/harness" "$ROOT/module/Main.qml" "$OUT" "$ROOT"
+# like Basecamp, run the view from an installed plugin dir (it may only read files below it)
+PLUG="$OUT/plugins/swamp"; rm -rf "$OUT/plugins"; mkdir -p "$PLUG"; cp "$ROOT/module/Main.qml" "$PLUG/"
+QML_IMPORT_PATH="$DS" "$OUT/harness" "$PLUG/Main.qml" "$OUT" "$ROOT"

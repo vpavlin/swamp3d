@@ -67,6 +67,16 @@ int main(int argc, char** argv) {
     json v1 = model["versions"][0];
     CHECK(v1["files"][0]["name"] == "74890.stl" && v1["images"][0]["kind"] == "thumb", "version lists the STL and an auto thumbnail");
     CHECK(!v1.contains("fp") || v1["fp"].is_null(), "getModel hides the fingerprint blob from the UI");
+    {   // views are sandboxed in Basecamp 0.3: pictures are copied into the view's own dir
+        std::string tsha = v1["images"][0]["sha256"];
+        std::string vdir = root + "/plugins/swamp"; fs::create_directories(vdir);
+        json img = json::parse(bob->core.cacheImage(tsha, vdir));
+        std::string ip = img.value("path", "");
+        CHECK(img.value("ok", false) && ip.rfind(vdir + "/cache/", 0) == 0 && fs::exists(ip), "cacheImage copies the thumbnail into the view's cache dir");
+        CHECK(fs::exists(ip) && fs::file_size(ip) < 100000, "the thumbnail is compressed");
+        CHECK(!json::parse(bob->core.cacheImage(v1["files"][0]["sha256"], vdir)).value("ok", true), "refuses a blob that isn't a listed picture");
+        CHECK(!json::parse(bob->core.cacheImage(tsha, root + "/alice")).value("ok", true), "refuses a directory that isn't the view's");
+    }
     CHECK(json::parse(alice->core.listModels(json{{"tag", "Bracelet"}}.dump()))["models"].size() == 1, "tag filter (case-insensitive)");
 
     // the hub caches everything; then alice goes offline and bob still downloads, verified

@@ -122,6 +122,7 @@ arguments, no default arguments.
 | `download(modelId, v)` | fetch every file of that version into `~/Swamp/<title>-<modelId8>-v<v>/`; progress via `getModel` |
 | `comment(modelId, text)`, `postMake(modelId, makeJson)`, `like(modelId, on)` | community events |
 | `setProfile(profileJson)` | `{name, bio}` |
+| `cacheImage(sha, viewDir)` | copy a picture the node holds (a listed thumbnail or photo) into `<viewDir>/cache/` and return its path. Basecamp 0.3 sandboxes views: a view may load only `qrc:` and files under its own plugin dir — no `file://` elsewhere, no `data:` URLs. `viewDir` must be a directory named `swamp`; the cache keeps ≤ 300 files |
 | `retract(modelId, reason)` | creator only |
 | `resync()` | catch-up now |
 

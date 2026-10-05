@@ -263,3 +263,22 @@ memory. Received frames block in the meantime. That is fine for M1, but large fi
   arguments, and have no trailing comments on the declaration lines in the header. Module calls are deferred
   1 s out of `onContextReady`. Storage, AsyncResult and the timer are posted to the module thread through
   `onLoop`. The exceptions are the loam_core callbacks (M5) and the synchronous fold in `onContextReady` (H3).
+
+## Basecamp 0.3.1 GUI test (same day)
+
+Separate profile (`HOME=/tmp/bc031/home`), Xvfb, packages from a throwaway local HTTPS repo
+(127.0.0.1, test CA via `CURL_CA_BUNDLE` only — no system trust change). Logos Official disabled.
+
+- Install with dependencies, upgrade 0.1.0 → 0.1.1 → 0.1.2 through the package manager: OK.
+- View: 0 QML errors; core reaches Connected; the catalogue syncs from the fleet.
+- **Found: thumbnails blank.** Basecamp's plugin sandbox blocks `file://` outside the plugin dir
+  and `data:` URLs (`logos.basecamp.sandbox: Blocked URL import …`). The QML harness had no
+  sandbox, so it never showed. Fix (0.1.2): `cacheImage(sha, viewDir)` copies the picture into the
+  view's own `cache/`; thumbnails are now zlib-compressed (`qCompress`), a few KB instead of
+  262 KB. The harness now runs the view from an installed-style `plugins/swamp/` dir with a
+  Basecamp-like URL sandbox; the old code fails it (10 blocked), the fix passes.
+- Headless node A (logosctl) publishes → it appears in Basecamp; its thumbnail arrives over
+  Storage in 40 s; **Download clicked in the GUI → file byte-identical in 50 s**; a like and a
+  comment made in the GUI reach node A in ~5 s.
+- Rig note: Basecamp's host Storage config needed A's SPR as `bootstrap-node` (same as the
+  two-node test).

@@ -31,6 +31,8 @@ public:
     std::string resync();
     std::string listModels(std::string queryJson);
     std::string getModel(std::string modelId);
+    // copy a picture this node holds into <viewDir>/cache/ and return its path (views are sandboxed)
+    std::string cacheImage(std::string sha, std::string viewDir);
 
     // creators
     std::string publish(std::string draftJson);

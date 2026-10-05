@@ -104,7 +104,24 @@ Item {
     TextEdit { id: clip; visible: false }
     function copy(t, what) { clip.text = t; clip.selectAll(); clip.copy(); root.toast((what || "Text") + " copied", false) }
 
-    function fileUrl(p) { return p ? ("file://" + p) : "" }
+    // Basecamp 0.3 sandboxes a view: it may load only files under its own plugin dir (no file://
+    // elsewhere, no data: URLs). The core copies each picture into <this dir>/cache/ on request.
+    readonly property string viewDir: { var u = String(Qt.resolvedUrl(".")); u = u.indexOf("file://") === 0 ? decodeURIComponent(u.slice(7)) : u; return u.replace(/\/+$/, "") }
+    property var imgCache: ({})
+    property int imgRev: 0
+    function imageUrl(p) {
+        if (!p) return ""
+        var sha = String(p).split("/").pop()
+        var c = root.imgCache[sha]
+        if (c !== undefined) return c
+        root.imgCache[sha] = ""
+        root.core("cacheImage", [sha, root.viewDir], function (raw) {
+            var r = root.parse(raw)
+            if (r && r.ok && r.path) { root.imgCache[sha] = "file://" + r.path; root.imgRev++ }
+            else delete root.imgCache[sha]
+        })
+        return ""
+    }
     function size(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : n > 1024 ? Math.round(n / 1024) + " KB" : n + " B" }
     function day(ms) { return ms ? new Date(ms).toISOString().slice(0, 10) : "" }
     function ver() { if (!root.model) return null; var vs = root.model.versions; var i = root.openVersion > 0 ? root.openVersion - 1 : vs.length - 1; return vs[Math.min(i, vs.length - 1)] }
@@ -148,7 +165,7 @@ Item {
     component Thumb: Rectangle {
         property string path: ""
         color: root.cInset; radius: root.rad; clip: true
-        Image { anchors.fill: parent; anchors.margins: 4; source: root.fileUrl(parent.path); fillMode: Image.PreserveAspectFit; asynchronous: true; visible: status === Image.Ready }
+        Image { anchors.fill: parent; anchors.margins: 4; source: { root.imgRev; return root.imageUrl(parent.path) } fillMode: Image.PreserveAspectFit; asynchronous: true; visible: status === Image.Ready }
         T3 { anchors.centerIn: parent; visible: !parent.path; text: "no preview yet" }
     }
 

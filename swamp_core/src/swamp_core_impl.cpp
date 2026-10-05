@@ -2,6 +2,7 @@
 #include "logos_sdk.h"
 #include "logos_sync/catchup.hpp"
 #include "swamp_fp.hpp"
+#define SWAMP_THUMB_QT 1   // the module links Qt Core: compress thumbnails with qCompress
 #include "swamp_thumb.hpp"
 #include <QTimer>
 #include <QObject>
@@ -19,7 +20,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.1.0";
+static const char* SWAMP_VERSION = "0.1.2";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -41,6 +42,8 @@ static constexpr int kMaxFetches = 6;
 static constexpr int kPreviewFetches = 2;
 static constexpr long long kPreviewMaxBytes = 2 * 1024 * 1024;
 static constexpr int kHubConcurrency = 3;
+static constexpr long long kImageMaxBytes = 16 * 1024 * 1024;
+static constexpr size_t kImageCacheFiles = 300;
 static constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
 static constexpr int kJobRounds = 3;                 // full passes over a file's CIDs before a download fails
 
@@ -967,6 +970,48 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
     c["remixes"] = remixes;
     c["retractReason"] = m.retractReason;
     return ok(json{{"model", c}});
+}
+
+// Basecamp 0.3 sandboxes a view: it may load only qrc: and files under its own plugin dir (no
+// file:// elsewhere, no data: URLs). So the view passes its dir and we copy the picture into
+// <viewDir>/cache/ - a cache only (an upgrade wipes it; we refill on demand). Only blobs the
+// catalogue lists as pictures, only real images, only into a dir named like the plugin.
+std::string SwampCoreImpl::cacheImage(std::string sha, std::string viewDir) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    sha = unquote(sha); viewDir = unquote(viewDir);
+    if (!isHex(sha, 64) || !haveBlob(sha)) return fail("Not on this device yet");
+    while (viewDir.size() > 1 && viewDir.back() == '/') viewDir.pop_back();
+    std::error_code ec;
+    if (viewDir.empty() || viewDir[0] != '/' || viewDir.find("..") != std::string::npos ||
+        fs::path(viewDir).filename() != "swamp" || !fs::is_directory(viewDir, ec)) return fail("Not the Swamp view's directory");
+    bool listed = false;
+    for (const auto& [id, m] : m_cat.models) {
+        for (const auto& v : m.versions) for (const auto& im : arr(v, "images")) if (str(im, "sha256") == sha) listed = true;
+        for (const auto& mk : m.makes) for (const auto& im : arr(mk, "images")) if (str(im, "sha256") == sha) listed = true;
+        if (listed) break;
+    }
+    if (!listed) return fail("Not a picture in the catalogue");
+    if ((long long)fs::file_size(blobPath(sha), ec) > kImageMaxBytes) return fail("Picture too large to show");
+    std::string head;
+    { std::ifstream f(blobPath(sha), std::ios::binary); head.resize(16); f.read(head.data(), 16); head.resize((size_t)std::max<std::streamsize>(0, f.gcount())); }
+    std::string mime = sniffImage(head);
+    if (mime.empty()) return fail("Not an image");
+    std::string ext = mime == "image/png" ? ".png" : mime == "image/jpeg" ? ".jpg" : ".webp";
+    std::string dir = viewDir + "/cache", out = dir + "/" + sha + ext;
+    if (!fs::exists(out, ec)) {
+        fs::create_directories(dir, ec);
+        // keep the cache bounded: drop the oldest files past kImageCacheFiles
+        std::vector<std::pair<fs::file_time_type, fs::path>> files;
+        for (const auto& de : fs::directory_iterator(dir, ec)) if (de.is_regular_file(ec)) files.push_back({de.last_write_time(ec), de.path()});
+        if (files.size() >= kImageCacheFiles) {
+            std::sort(files.begin(), files.end());
+            for (size_t k = 0; k + kImageCacheFiles <= files.size(); k++) fs::remove(files[k].second, ec);
+        }
+        fs::copy_file(blobPath(sha), out + ".tmp", fs::copy_options::overwrite_existing, ec);
+        if (!ec) fs::rename(out + ".tmp", out, ec);
+        if (ec) return fail("Couldn't write the picture cache: " + ec.message());
+    }
+    return ok(json{{"path", out}});
 }
 
 // ---- creators -------------------------------------------------------------------------------

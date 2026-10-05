@@ -1,12 +1,16 @@
 #pragma once
 // swamp_thumb.hpp - render a mesh to a small PNG thumbnail at publish time (docs/adr/0008:
 // thumbnails before a 3D viewer). Flat-shaded, z-buffered, orthographic three-quarter view,
-// transparent background. Dependency-free: a tiny rasterizer + a stored-deflate PNG writer.
+// transparent background. A tiny rasterizer + a PNG writer: zlib via Qt (qCompress) when built with
+// Qt Core, else stored (uncompressed) deflate - ~250 KB instead of a few KB, but dependency-free.
 #include <vector>
 #include <string>
 #include <cmath>
 #include <cstdint>
 #include <algorithm>
+#if defined(QT_CORE_LIB) || defined(SWAMP_THUMB_QT)
+#include <QByteArray>
+#endif
 
 namespace swamp {
 namespace thumb {
@@ -29,6 +33,11 @@ inline std::string png(const std::vector<uint8_t>& rgba, int w, int h) {
     };
     std::string raw;
     for (int y = 0; y < h; y++) { raw += '\0'; raw.append((const char*)&rgba[(size_t)y * w * 4], (size_t)w * 4); }
+#if defined(QT_CORE_LIB) || defined(SWAMP_THUMB_QT)
+    // qCompress = 4-byte big-endian length + a zlib stream, which is exactly what IDAT holds
+    QByteArray q = qCompress((const uchar*)raw.data(), (qsizetype)raw.size(), 9);
+    std::string z(q.constData() + 4, (size_t)q.size() - 4);
+#else
     // zlib stream with stored (uncompressed) deflate blocks
     std::string z = "\x78\x01";
     uint32_t a = 1, b = 0;
@@ -43,6 +52,7 @@ inline std::string png(const std::vector<uint8_t>& rgba, int w, int h) {
         if (last) break;
     }
     be32(z, (b << 16) | a);
+#endif
     std::string out = "\x89PNG\r\n\x1a\n";
     std::string ihdr;
     be32(ihdr, w); be32(ihdr, h);

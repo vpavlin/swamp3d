@@ -3,10 +3,13 @@
 //   scripts/qml-harness/render.sh
 #include <QGuiApplication>
 #include <QQmlEngine>
+#include <QQmlAbstractUrlInterceptor>
 #include <QQmlContext>
 #include <QQuickView>
 #include <QQuickItem>
 #include <QTimer>
+#include <QFileInfo>
+#include <QLibraryInfo>
 #include <QElapsedTimer>
 #include <QJSValue>
 #include <filesystem>
@@ -31,6 +34,7 @@ public:
         if (m == "resync") return core->resync();
         if (m == "listModels") return core->listModels(s(0));
         if (m == "getModel") return core->getModel(s(0));
+        if (m == "cacheImage") return core->cacheImage(s(0), s(1));
         if (m == "publish") return core->publish(s(0));
         if (m == "retract") return core->retract(s(0), s(1));
         if (m == "download") return core->download(s(0), s(1));
@@ -50,6 +54,25 @@ signals:
     void moduleEventReceived(const QString& mod, const QString& ev, const QString& data);
 };
 #include "harness.moc"
+
+// Like Basecamp 0.3's plugin sandbox: a view may load files only from its own directory (and Qt's
+// QML imports). Anything else is blocked and counted, so a view that reads the core's data dir by
+// path fails here too instead of only in Basecamp.
+struct Sandbox : QQmlAbstractUrlInterceptor {
+    QStringList roots;
+    int blocked = 0;
+    QUrl intercept(const QUrl& url, DataType type) override {
+        if (getenv("SANDBOX_TRACE")) fprintf(stderr, "INTERCEPT %d %s\n", (int)type, url.toString().left(100).toUtf8().constData());
+        if (type != UrlString) return url;   // module/qmldir probes are not the view's file access
+        if (url.scheme() == "data") { blocked++; fprintf(stderr, "SANDBOX blocked a data: URL\n"); return QUrl(); }
+        if (!url.isLocalFile()) return url;   // module/qmldir probes are not the view's file access
+        QString p = url.toLocalFile();
+        for (const auto& r : roots) if (p.startsWith(r)) return url;
+        blocked++;
+        fprintf(stderr, "SANDBOX blocked %s\n", p.toUtf8().constData());
+        return QUrl();
+    }
+};
 struct Peer { FakeLoamNode bus; FakeStoreNode store; SwampCoreImpl core; };
 static Peer* spawn(const std::string& root, const std::string& name) {
     setenv("SWAMP_CORE_DATA", (root + "/" + name + "/data").c_str(), 1);
@@ -86,6 +109,11 @@ int main(int argc, char** argv) {
     pump(1500);
 
     QQuickView view; view.setResizeMode(QQuickView::SizeRootObjectToView); view.resize(1280, 900);
+    Sandbox sandbox;
+    sandbox.roots << QFileInfo(QString::fromStdString(qml)).absolutePath() + "/" << QLibraryInfo::path(QLibraryInfo::QmlImportsPath) + "/";
+    // the engine's import path includes the harness's own dir, which also holds the test data
+    for (const auto& ip : view.engine()->importPathList()) if (ip != QCoreApplication::applicationDirPath() && !ip.startsWith("qrc:")) sandbox.roots << ip + "/";
+    view.engine()->addUrlInterceptor(&sandbox);
     RealLogos logos; logos.core = &me->core;
     view.engine()->rootContext()->setContextProperty("logos", &logos);
     view.setSource(QUrl::fromLocalFile(QString::fromStdString(qml)));
@@ -98,6 +126,7 @@ int main(int argc, char** argv) {
     shot("model");
     r->setProperty("openId", ""); r->setProperty("tab", "publish"); shot("publish");
     r->setProperty("tab", "me"); shot("me");
-    fprintf(stderr, "QML_ERRORS=%d\n", g_errors);
+    fprintf(stderr, "QML_ERRORS=%d SANDBOX_BLOCKED=%d\n", g_errors, sandbox.blocked);
+    g_errors += sandbox.blocked;
     return g_errors ? 1 : 0;
 }
