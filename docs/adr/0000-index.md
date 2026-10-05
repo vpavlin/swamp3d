@@ -1,4 +1,4 @@
-# ADRs (all Proposed - research phase)
+# ADRs
 
 | # | Decision |
 |---|---|
@@ -10,3 +10,8 @@
 | 0006 | [Files live in Logos Storage, kept alive by pinning hubs](0006-storage-with-pinning-hubs.md) |
 | 0007 | [Free models and tips first; paid models in phase 2](0007-free-first-payments-later.md) |
 | 0008 | [Basecamp core module + pure-QML view; thumbnails and slicer handoff before a 3D viewer](0008-basecamp-core-view.md) |
+| 0009 | [The catalogue is one public, signed event log on one topic](0009-one-public-catalogue-topic.md) |
+| 0010 | [Only a model's creator can extend it; versions are immutable](0010-creator-only-model-history.md) |
+| 0011 | [Public files are identified by the plain SHA-256 of their bytes](0011-plain-content-hashes-for-public-files.md) |
+| 0012 | [Built on the Basecamp 0.3 stack from day one](0012-basecamp-0-3-stack.md) |
+| 0013 | [Every version carries its fingerprint from the first release](0013-fingerprint-at-publish.md) |
