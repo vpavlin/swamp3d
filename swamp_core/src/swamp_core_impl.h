@@ -16,6 +16,8 @@
 #include <set>
 #include <mutex>
 #include <functional>
+#include <memory>
+#include <atomic>
 #include "logos_module_context.h"
 #include "swamp_catalog.hpp"
 
@@ -48,8 +50,9 @@ logos_events:
     void stateChanged(const std::string& summaryJson);
 
 private:
-    struct PendingUpload { std::string sha, path; long long since = 0; };
-    struct PendingDownload { std::string sha, cid, part; long long size = 0, since = 0; size_t cidIndex = 0; };
+    struct PendingUpload { std::string sha; long long since = 0; };
+    // One entry per blob being fetched: which candidate CID we're on, retries, and the transfer.
+    struct Fetch { size_t cidIdx = 0; int rounds = 0; long long nextTry = 0, since = 0, size = 0, seenSize = 0, grewAt = 0; bool inflight = false, gaveUp = false; std::string cid, session, error; };
     struct DownloadJob { std::string modelId; int v = 0; std::string dir; std::vector<std::pair<std::string, std::string>> files; std::string status, error; };
 
     // persistence + identity
@@ -67,26 +70,34 @@ private:
     bool ingest(const swamp::Event& e);
     swamp::json card(const swamp::Model& m);
     std::string nameOf(const std::string& address);
+    std::set<std::string> myBlobs();
 
     // transport (loam_core)
     void startModules();
     void startTransport();
+    void onStatus(const std::string& s);
     void sendFrame(const swamp::json& frame);
-    void onFrame(const std::string& topic, const std::string& payloadB64);
+    void onFrame(const std::string& topic, const std::string& payloadB64, int64_t sentAt);
+    void handleFrame(const swamp::json& f, bool live);
+    void serveEvents(const std::vector<swamp::Event>& evs);
     void catchupRound();
 
     // storage (host-owned node)
     void ensureStorage();
     void uploadBlob(const std::string& sha);
-    void announceCids(const std::map<std::string, std::string>& cids);
-    void startFetch(const std::string& sha, long long size);
     void completeUpload(const std::string& payload);
+    void flushAnnouncements();
+    void startFetch(const std::string& sha, long long size);
+    void fetchFailed(const std::string& sha, const std::string& why);
     void completeDownload(const std::string& sessionId, bool ok, const std::string& error);
     void finishFetched(const std::string& sha);
     void pollStorage();
     void advanceJobs();
     void hubSweep();
     void fetchPreviews();
+    void retryUploads();
+    bool storageFree();
+    void storageDone();
 
     void tick();
     void onLoop(std::function<void()> fn);
@@ -98,17 +109,25 @@ private:
     std::recursive_mutex m_mtx;
     std::string m_dataDir, m_downloadsDir, m_status = "Starting...";
     bool m_storageOk = true, m_ready = false, m_transportStarted = false, m_storageStarted = false, m_storageHostOwned = false, m_hub = false;
+    bool m_dirty = false, m_unsaved = false, m_loaded = false;
+    // false once destroyed: module/storage callbacks hold a copy and check it before touching `this`
+    std::shared_ptr<std::atomic<bool>> m_life = std::make_shared<std::atomic<bool>>(true);
     swamp::Identity m_id;
     std::vector<swamp::Event> m_log;
     std::set<std::string> m_logIds;
     swamp::Catalog m_cat;
     std::map<std::string, PendingUpload> m_upSessions;
-    std::map<std::string, PendingDownload> m_downSessions;
-    std::set<std::string> m_fetching;
-    std::map<std::string, long long> m_fetchGaveUp;
+    std::map<std::string, long long> m_upTried;
+    std::map<std::string, Fetch> m_fetch;
     std::map<std::string, DownloadJob> m_jobs;
-    std::map<std::string, std::string> m_myCids;
+    std::map<std::string, std::string> m_myCids, m_toAnnounce;
+    std::map<std::string, long long> m_announcedAt, m_answeredAt;
     QTimer* m_timer = nullptr;
-    long long m_lastCatchup = 0;
-    long m_rx = 0, m_tx = 0, m_rxEvents = 0, m_rxBad = 0, m_uploaded = 0, m_fetched = 0, m_verifyFailed = 0;
+    // one Storage request at a time: storage 3.x serves calls in turn and a download start can
+    // wait ~30 s for a manifest, so queued calls would pile up past the IPC timeout
+    bool m_storageBusy = false;
+    long long m_storageBusySince = 0;
+    long long m_lastCatchup = 0, m_lastSave = 0, m_serveWindow = 0, m_lastStatusPoll = 0, m_lastManifestPoll = 0, m_announceHeldSince = 0;
+    int m_servedInWindow = 0;
+    long m_rx = 0, m_tx = 0, m_rxEvents = 0, m_rxBad = 0, m_uploaded = 0, m_fetched = 0, m_verifyFailed = 0, m_tooBig = 0, m_servedEvents = 0, m_throttled = 0, m_staleCatchup = 0, m_stalled = 0;
 };

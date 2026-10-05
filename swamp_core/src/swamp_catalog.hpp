@@ -44,10 +44,32 @@ inline bool knownType(const std::string& t) {
     return T.count(t) > 0;
 }
 
+// ── type-safe access to UNTRUSTED json (nlohmann .value() throws on a wrong type) ─────────────
+inline std::string str(const json& j, const char* k) {
+    if (!j.is_object()) return "";
+    auto it = j.find(k);
+    return it != j.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+inline long long num(const json& j, const char* k, long long dflt = 0) {
+    if (!j.is_object()) return dflt;
+    auto it = j.find(k);
+    return it != j.end() && it->is_number_integer() ? it->get<long long>() : dflt;
+}
+inline bool flag(const json& j, const char* k, bool dflt = false) {
+    if (!j.is_object()) return dflt;
+    auto it = j.find(k);
+    return it != j.end() && it->is_boolean() ? it->get<bool>() : dflt;
+}
+inline const json& arr(const json& j, const char* k) {
+    static const json empty = json::array();
+    if (!j.is_object()) return empty;
+    auto it = j.find(k);
+    return it != j.end() && it->is_array() ? *it : empty;
+}
+
 // ── validation of the version payload (refuse up front; the fold uses the same rules) ──────────
 inline std::string clip(const json& j, const char* k, size_t max) {
-    if (!j.contains(k) || !j[k].is_string()) return "";
-    std::string s = j[k].get<std::string>();
+    std::string s = str(j, k);
     return s.size() > max ? s.substr(0, max) : s;
 }
 inline bool safeName(const std::string& n) {
@@ -55,29 +77,43 @@ inline bool safeName(const std::string& n) {
     for (char c : n) if (c == '/' || c == '\\' || (unsigned char)c < 0x20) return false;
     return true;
 }
+constexpr long long MAX_FILE_BYTES = 1024LL * 1024 * 1024;   // 1 GiB per file
 inline bool validBlobRef(const json& f, bool needName) {
-    if (!f.is_object() || !isHex(f.value("sha256", ""), 64)) return false;
-    if (!f.contains("size") || !f["size"].is_number_integer() || f["size"].get<long long>() <= 0) return false;
-    if (needName && !safeName(f.value("name", ""))) return false;
+    if (!f.is_object() || !isHex(str(f, "sha256"), 64)) return false;
+    long long size = num(f, "size", 0);
+    if (size <= 0 || size > MAX_FILE_BYTES) return false;
+    if (needName && !safeName(str(f, "name"))) return false;
     return true;
 }
 /** Returns "" if valid, else a sentence. */
 inline std::string validateVersion(const json& p) {
     if (!p.is_object()) return "version is not an object";
-    std::string title = p.value("title", "");
+    for (const char* k : {"title", "summary", "description", "licence"})
+        if (p.contains(k) && !p[k].is_string()) return std::string(k) + " must be text";
+    std::string title = str(p, "title");
     if (title.empty() || title.size() > 140) return "a title (1-140 characters) is required";
-    if (p.value("description", "").size() > 8192) return "description is longer than 8 KiB";
-    if (p.value("summary", "").size() > 280) return "summary is longer than 280 characters";
-    std::string lic = p.value("licence", "");
+    if (str(p, "description").size() > 8192) return "description is longer than 8 KiB";
+    if (str(p, "summary").size() > 280) return "summary is longer than 280 characters";
+    std::string lic = str(p, "licence");
     if (lic.empty() || lic.size() > 64) return "choose a licence";
-    if (!p.contains("files") || !p["files"].is_array() || p["files"].empty() || p["files"].size() > 64) return "a version needs 1-64 files";
-    for (const auto& f : p["files"]) if (!validBlobRef(f, true)) return "a file entry is malformed";
+    const json& files = arr(p, "files");
+    if (files.empty() || files.size() > 64) return "a version needs 1-64 files";
+    std::set<std::string> names;
+    for (const auto& f : files) {
+        if (!validBlobRef(f, true)) return "a file entry is malformed";
+        if (!names.insert(str(f, "name")).second) return "two files have the same name: " + str(f, "name");
+    }
     if (p.contains("images") && (!p["images"].is_array() || p["images"].size() > 16)) return "at most 16 images";
-    if (p.contains("images")) for (const auto& f : p["images"]) if (!validBlobRef(f, false)) return "an image entry is malformed";
+    for (const auto& f : arr(p, "images")) if (!validBlobRef(f, false) || num(f, "size") > 16 * 1024 * 1024) return "an image entry is malformed (or larger than 16 MiB)";
     if (p.contains("tags") && (!p["tags"].is_array() || p["tags"].size() > 16)) return "at most 16 tags";
-    if (p.contains("tags")) for (const auto& t : p["tags"]) if (!t.is_string() || t.get<std::string>().empty() || t.get<std::string>().size() > 32) return "tags are 1-32 characters";
+    for (const auto& t : arr(p, "tags")) if (!t.is_string() || t.get<std::string>().empty() || t.get<std::string>().size() > 32) return "tags are 1-32 characters";
     if (p.contains("parents") && (!p["parents"].is_array() || p["parents"].size() > 8)) return "at most 8 parents";
-    if (p.contains("parents")) for (const auto& r : p["parents"]) if (!r.is_object() || !isHex(r.value("modelId", ""), 32)) return "a parent reference is malformed";
+    for (const auto& r : arr(p, "parents")) if (!r.is_object() || !isHex(str(r, "modelId"), 32) || num(r, "v", 0) < 1) return "a parent reference is malformed";
+    if (p.contains("fp") && !p["fp"].is_null()) {
+        const json& f = p["fp"];
+        if (!validBlobRef(f, false) || arr(f, "d2").size() != 64 || arr(f, "a3").size() != 32) return "the fingerprint entry is malformed";
+        for (const char* k : {"d2", "a3"}) for (const auto& x : arr(f, k)) if (!x.is_number()) return "the fingerprint entry is malformed";
+    }
     return "";
 }
 
@@ -95,7 +131,8 @@ struct Model {
 struct Catalog {
     std::map<std::string, Model> models;
     std::map<std::string, json> profiles;        // author -> {name, bio}
-    std::map<std::string, std::vector<std::string>> cids;   // sha256 -> candidate CIDs (<= 4)
+    std::map<std::string, std::vector<std::string>> cids;   // sha256 -> candidate CIDs, best first
+    std::map<std::string, std::string> owner;                // sha256 -> creator of the first model listing it
     size_t events = 0, rejected = 0;
 };
 
@@ -105,72 +142,103 @@ inline bool payloadOk(const Event& e) {
 
 /** Admit an event to the log at all (signature, type, size). Content rules live in the fold. */
 inline bool admissible(const Event& e) {
+    // The signature covers hlc.dev, not e.dev: the author IS the signer, or anyone could post as
+    // anyone (review C1).
+    if (e.dev.empty() || e.dev != e.hlc.dev) return false;
+    if (e.id.empty() || e.id.size() > 64 || e.pub.size() > 70 || e.sig.size() > 140 || e.type.size() > 32) return false;
     return knownType(e.type) && payloadOk(e) && logos_sync::verifyEvent(DOMAIN, e);
 }
 
-inline Catalog fold(const std::vector<Event>& log) {
+/** Parse an event from untrusted JSON without throwing. */
+inline bool eventFrom(const json& j, Event& out) {
+    if (!j.is_object()) return false;
+    try { out = logos_sync::eventFromJson(j); } catch (...) { return false; }
+    return true;
+}
+
+// Fold is order-independent in practice: pass 1 builds models and versions (HLC order, the
+// creator's own events), pass 2 applies everything that only REFERS to a model, so a comment from
+// a peer whose clock lags the creator's still lands (review H5).
+// `admitted`: every event already passed admissible() on the way in (the module checks each event
+// once, at ingest), so the ~0.5 ms signature check isn't paid again on every refold (review H3).
+inline Catalog fold(const std::vector<Event>& log, bool admitted = false) {
     Catalog c;
     std::vector<Event> evs = logos_sync::mergeEvents(log, {});
-    for (const auto& e : evs) {
-        if (!admissible(e)) { c.rejected++; continue; }
-        c.events++;
-        const json& p = e.payload;
-        const std::string& who = e.dev;
-        const long long t = e.hlc.wall;
-        auto model = [&](const std::string& id) -> Model* { auto it = c.models.find(id); return it == c.models.end() ? nullptr : &it->second; };
+    std::vector<const Event*> ok;
+    for (const auto& e : evs) { if (admitted || admissible(e)) ok.push_back(&e); else c.rejected++; }
+    c.events = ok.size();
+    auto model = [&](const std::string& id) -> Model* { auto it = c.models.find(id); return it == c.models.end() ? nullptr : &it->second; };
+    // pass 1: models, versions, retractions, profiles
+    for (const Event* ep : ok) {
+        const Event& e = *ep; const json& p = e.payload; const std::string& who = e.dev; const long long t = e.hlc.wall;
         if (e.type == "profile.put") {
             c.profiles[who] = json{{"name", clip(p, "name", 60)}, {"bio", clip(p, "bio", 500)}};
         } else if (e.type == "model.create") {
-            std::string id = p.value("modelId", ""), nonce = p.value("nonce", "");
-            if (!isHex(id, 32) || nonce.empty() || modelIdFor(who, nonce) != id || c.models.count(id)) { c.rejected++; continue; }
+            std::string id = str(p, "modelId"), nonce = str(p, "nonce");
+            if (!isHex(id, 32) || nonce.empty() || nonce.size() > 64 || modelIdFor(who, nonce) != id || c.models.count(id)) { c.rejected++; continue; }
             Model m; m.modelId = id; m.creator = who; m.created = t; m.lastActivity = t;
             c.models[id] = m;
         } else if (e.type == "model.version") {
-            Model* m = model(p.value("modelId", ""));
-            if (!m || m->creator != who || !validateVersion(p).empty()) { c.rejected++; continue; }
-            if (!p.contains("v") || !p["v"].is_number_integer() || p["v"].get<long long>() != (long long)m->versions.size() + 1) { c.rejected++; continue; }
-            json v = p;
-            v["published"] = t;
-            v["author"] = who;
+            Model* m = model(str(p, "modelId"));
+            if (!m || m->creator != who || !validateVersion(p).empty() || num(p, "v", 0) != (long long)m->versions.size() + 1) { c.rejected++; continue; }
+            json v = p; v["published"] = t; v["author"] = who;
             m->versions.push_back(v);
             m->lastActivity = std::max(m->lastActivity, t);
-        } else if (e.type == "blob.cids") {
+            for (const char* k : {"files", "images"}) for (const auto& f : arr(p, k)) c.owner.emplace(str(f, "sha256"), who);
+            if (p.contains("fp") && p["fp"].is_object()) c.owner.emplace(str(p["fp"], "sha256"), who);
+        } else if (e.type == "model.retract") {
+            Model* m = model(str(p, "modelId"));
+            if (!m || m->creator != who) { c.rejected++; continue; }
+            m->retracted = true; m->retractReason = clip(p, "reason", 280);
+        }
+    }
+    // pass 2: references (CIDs, comments, makes, likes)
+    std::map<std::string, std::vector<std::string>> fromOwner, fromOthers;
+    std::map<std::string, std::map<std::string, int>> perAnnouncer;   // sha -> announcer -> count
+    for (const Event* ep : ok) {
+        const Event& e = *ep; const json& p = e.payload; const std::string& who = e.dev; const long long t = e.hlc.wall;
+        if (e.type == "blob.cids") {
             if (!p.contains("cids") || !p["cids"].is_object() || p["cids"].size() > 96) { c.rejected++; continue; }
             for (auto it = p["cids"].begin(); it != p["cids"].end(); ++it) {
                 if (!isHex(it.key(), 64) || !it.value().is_string()) continue;
                 std::string cid = it.value().get<std::string>();
                 if (cid.empty() || cid.size() > 128) continue;
-                auto& v = c.cids[it.key()];
-                if (std::find(v.begin(), v.end(), cid) == v.end() && v.size() < 4) v.push_back(cid);
+                // CID policy (review H4): the creator's CIDs always come first; every other announcer
+                // gets at most one CID per blob, and at most 8 others are kept - junk can't crowd out
+                // the real one, and a lying mirror only costs a failed (hash-checked) fetch.
+                auto own = c.owner.find(it.key());
+                bool isOwner = own != c.owner.end() && own->second == who;
+                auto& list = isOwner ? fromOwner[it.key()] : fromOthers[it.key()];
+                if (std::find(list.begin(), list.end(), cid) != list.end()) continue;
+                if (isOwner) { if (list.size() < 4) list.push_back(cid); continue; }
+                if (perAnnouncer[it.key()][who]++ >= 1 || list.size() >= 8) continue;
+                list.push_back(cid);
             }
-        } else if (e.type == "model.retract") {
-            Model* m = model(p.value("modelId", ""));
-            if (!m || m->creator != who) { c.rejected++; continue; }
-            m->retracted = true; m->retractReason = clip(p, "reason", 280);
         } else if (e.type == "comment.post" || e.type == "make.post") {
-            Model* m = model(p.value("modelId", ""));
+            Model* m = model(str(p, "modelId"));
             std::string text = clip(p, "text", 4000);
             if (!m || (text.empty() && e.type == "comment.post")) { c.rejected++; continue; }
             json item{{"id", e.id}, {"author", who}, {"text", text}, {"at", t}};
             if (e.type == "make.post") {
                 json imgs = json::array();
-                if (p.contains("images") && p["images"].is_array())
-                    for (const auto& f : p["images"]) if (validBlobRef(f, false) && imgs.size() < 8) imgs.push_back(f);
+                for (const auto& f : arr(p, "images")) if (validBlobRef(f, false) && num(f, "size") <= 16 * 1024 * 1024 && imgs.size() < 8) imgs.push_back(f);
                 item["images"] = imgs;
-                if (p.contains("v") && p["v"].is_number_integer()) item["v"] = p["v"];
+                if (num(p, "v", 0) > 0) item["v"] = num(p, "v", 0);
                 m->makes.push_back(item);
             } else {
-                if (p.contains("replyTo") && p["replyTo"].is_string()) item["replyTo"] = p["replyTo"];
+                std::string rt = clip(p, "replyTo", 64);
+                if (!rt.empty()) item["replyTo"] = rt;
                 m->comments.push_back(item);
             }
             m->lastActivity = std::max(m->lastActivity, t);
         } else if (e.type == "like.put") {
-            Model* m = model(p.value("modelId", ""));
+            Model* m = model(str(p, "modelId"));
             if (!m || !p.contains("on") || !p["on"].is_boolean()) { c.rejected++; continue; }
             m->likes[who] = p["on"].get<bool>();
         }
     }
-    // A model whose first version never arrived isn't shown (create without content).
+    for (auto& [sha, list] : fromOwner) c.cids[sha] = list;
+    for (auto& [sha, list] : fromOthers) { auto& out = c.cids[sha]; for (const auto& x : list) if (std::find(out.begin(), out.end(), x) == out.end()) out.push_back(x); }
     return c;
 }
 
@@ -180,15 +248,15 @@ inline int likeCount(const Model& m) { int n = 0; for (const auto& [a, on] : m.l
 inline bool matches(const Model& m, const std::string& q, const std::string& tag) {
     if (m.versions.empty()) return false;
     const json& v = m.versions.back();
-    auto lower = [](std::string s) { std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s; };
+    auto lower = [](std::string s) { for (auto& ch : s) if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a'); return s; };
     if (!tag.empty()) {
         bool has = false;
-        if (v.contains("tags")) for (const auto& t : v["tags"]) if (lower(t.get<std::string>()) == lower(tag)) has = true;
+        for (const auto& t : arr(v, "tags")) if (t.is_string() && lower(t.get<std::string>()) == lower(tag)) has = true;
         if (!has) return false;
     }
     if (q.empty()) return true;
-    std::string hay = lower(v.value("title", "") + " " + v.value("summary", ""));
-    if (v.contains("tags")) for (const auto& t : v["tags"]) hay += " " + lower(t.get<std::string>());
+    std::string hay = lower(str(v, "title") + " " + str(v, "summary"));
+    for (const auto& t : arr(v, "tags")) if (t.is_string()) hay += " " + lower(t.get<std::string>());
     return hay.find(lower(q)) != std::string::npos;
 }
 

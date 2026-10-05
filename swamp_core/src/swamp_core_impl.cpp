@@ -24,7 +24,25 @@ static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
 static constexpr long long kTransferStaleMs = 10 * 60 * 1000;
+static constexpr long long kStallMs = 2 * 60 * 1000;          // a download that stops growing this long is cancelled
+static constexpr long long kUploadRetryMs = 60000;
+static constexpr long long kManifestPollMs = 5000;
+static constexpr long long kReannounceMs = 10 * 60 * 1000;
+static constexpr long long kStatusPollMs = 15000;
+static constexpr long long kSaveEveryMs = 5000;
+static constexpr long long kServeWindowMs = 60000;
+static constexpr long long kCatchupMaxAgeMs = 2 * 60 * 1000;
+static constexpr long long kAnswerEveryMs = 20000;
+static constexpr int kServePerWindow = 200;          // events served per minute, all peers together
+static constexpr size_t kFrameBytes = 48 * 1024;     // events batched per frame up to this size
+static constexpr size_t kCidsPerEvent = 64;
+static constexpr long long kAnnounceHoldMs = 10000;
+static constexpr int kMaxFetches = 6;
+static constexpr int kPreviewFetches = 2;
+static constexpr long long kPreviewMaxBytes = 2 * 1024 * 1024;
 static constexpr int kHubConcurrency = 3;
+static constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
+static constexpr int kJobRounds = 3;                 // full passes over a file's CIDs before a download fails
 
 // ---- helpers --------------------------------------------------------------------------------
 static std::string b64std(const std::string& s) {
@@ -53,10 +71,14 @@ static bool unb64(const std::string& in, std::string& out) {
     return true;
 }
 static std::string ok(json extra = json::object()) { extra["ok"] = true; return extra.dump(); }
-static std::string realHome() {
-    if (struct passwd* pw = getpwuid(getuid())) if (pw->pw_dir && *pw->pw_dir == '/') return pw->pw_dir;
+// $HOME first: the 0.3 runtime gives each session/profile its own HOME, and module state must
+// follow it (a separate Basecamp test profile, or two logosctl nodes on one machine, must not
+// share data). Fall back to the account's home only when HOME is unset or relative.
+static std::string homeDir() {
     const char* h = getenv("HOME");
-    return h ? h : "/tmp";
+    if (h && *h == '/') return h;
+    if (struct passwd* pw = getpwuid(getuid())) if (pw->pw_dir && *pw->pw_dir == '/') return pw->pw_dir;
+    return "/tmp";
 }
 static bool readFile(const std::string& p, std::string& out) {
     std::ifstream f(p, std::ios::binary);
@@ -101,7 +123,12 @@ static std::string lowerExt(const std::string& name) {
     return e;
 }
 
-SwampCoreImpl::~SwampCoreImpl() { if (m_timer) { m_timer->stop(); delete m_timer; } }
+SwampCoreImpl::~SwampCoreImpl() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    *m_life = false;
+    if (m_unsaved || m_dirty) saveLog();
+    if (m_timer) { m_timer->stop(); delete m_timer; }
+}
 long long SwampCoreImpl::nowMs() const {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
@@ -120,9 +147,9 @@ void SwampCoreImpl::onLoop(std::function<void()> fn) {
 // ---- persistence ----------------------------------------------------------------------------
 void SwampCoreImpl::setupDataDir() {
     const char* ov = getenv("SWAMP_CORE_DATA");
-    m_dataDir = ov && *ov ? ov : realHome() + "/.swamp-core";
+    m_dataDir = ov && *ov ? ov : homeDir() + "/.swamp-core";
     const char* dl = getenv("SWAMP_DOWNLOADS");
-    m_downloadsDir = dl && *dl ? dl : realHome() + "/Swamp";
+    m_downloadsDir = dl && *dl ? dl : homeDir() + "/Swamp";
     std::error_code ec;
     fs::create_directories(m_dataDir + "/files", ec);
     fs::create_directories(m_dataDir + "/parts", ec);
@@ -148,34 +175,41 @@ void SwampCoreImpl::loadAll() {
         priv = logos_sync::generatePrivateKey();
         writeFile(m_dataDir + "/identity.json", json{{"priv", logos_sync::toHexS(priv.data(), priv.size())}}.dump());
     }
+    std::error_code pec;   // the signing key: owner-only
+    fs::permissions(m_dataDir + "/identity.json", fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, pec);
     m_id = identityFrom(priv);
     m_log.clear(); m_logIds.clear();
     if (readFile(m_dataDir + "/catalog.json", s)) {
         json a = json::parse(s, nullptr, false);
-        if (a.is_array()) for (const auto& e : a) { Event ev = logos_sync::eventFromJson(e); if (m_logIds.insert(ev.id).second) m_log.push_back(ev); }
+        // checked once here (the file could have been edited); refold() then trusts m_log
+        if (a.is_array()) for (const auto& j : a) { Event ev; if (eventFrom(j, ev) && admissible(ev) && m_logIds.insert(ev.id).second) m_log.push_back(ev); }
     }
-    for (const auto& e : m_log) if (e.dev == m_id.address) m_id.clock.receive(e.hlc);
+    long long now = nowMs();
+    for (const auto& e : m_log) if (e.dev == m_id.address || e.hlc.wall <= now + kMaxClockLeadMs) m_id.clock.receive(e.hlc);
     if (readFile(m_dataDir + "/jobs.json", s)) {
         json a = json::parse(s, nullptr, false);
         if (a.is_object()) for (auto it = a.begin(); it != a.end(); ++it) {
             const json& j = it.value();
             DownloadJob d; d.modelId = j.value("modelId", ""); d.v = j.value("v", 0); d.dir = j.value("dir", "");
             d.status = j.value("status", ""); d.error = j.value("error", "");
-            if (j.contains("files")) for (const auto& f : j["files"]) d.files.push_back({f.value("sha", ""), f.value("name", "")});
+            if (!j.is_object()) continue;
+            if (j.contains("files") && j["files"].is_array()) for (const auto& f : j["files"]) if (f.is_object()) d.files.push_back({str(f, "sha"), str(f, "name")});
             if (d.status == "fetching") d.status = "queued";   // resume after a restart
             m_jobs[it.key()] = d;
         }
     }
     if (readFile(m_dataDir + "/mycids.json", s)) {
         json a = json::parse(s, nullptr, false);
-        if (a.is_object()) for (auto it = a.begin(); it != a.end(); ++it) m_myCids[it.key()] = it.value().get<std::string>();
+        if (a.is_object()) for (auto it = a.begin(); it != a.end(); ++it) if (it.value().is_string()) m_myCids[it.key()] = it.value().get<std::string>();
     }
 }
 void SwampCoreImpl::saveLog() {
-    if (!m_storageOk) return;
+    if (!m_storageOk || m_dataDir.empty()) return;
     json a = json::array();
     for (const auto& e : m_log) a.push_back(logos_sync::eventToJson(e));
     writeFile(m_dataDir + "/catalog.json", a.dump());
+    m_lastSave = nowMs();
+    m_unsaved = false;
 }
 void SwampCoreImpl::saveJobs() {
     json o = json::object();
@@ -191,14 +225,18 @@ void SwampCoreImpl::saveJobs() {
 }
 
 // ---- catalogue ------------------------------------------------------------------------------
-void SwampCoreImpl::refold() { m_cat = fold(m_log); }
+void SwampCoreImpl::refold() { m_cat = fold(m_log, true); m_dirty = false; }
 bool SwampCoreImpl::ingest(const Event& e) {
-    if (!admissible(e) || m_logIds.count(e.id)) return false;
+    if (m_logIds.count(e.id) || !admissible(e)) return false;   // duplicates don't pay for a verify
     m_logIds.insert(e.id);
     m_log.push_back(e);
-    if (e.dev == m_id.address) m_id.clock.receive(e.hlc);
+    // stay causally after what we've seen, but don't let one future-dated event drag our clock along
+    if (e.hlc.wall <= nowMs() + kMaxClockLeadMs) m_id.clock.receive(e.hlc);
+    m_dirty = true;
     return true;
 }
+// Local writes fold and save at once (the caller reads the result straight back); received events
+// only mark the catalogue dirty and tick() folds once for the whole batch.
 Event SwampCoreImpl::author(const std::string& type, const json& payload) {
     Event e = makeEvent(m_id, type, payload, nowMs(), newId());
     ingest(e);
@@ -211,6 +249,23 @@ std::string SwampCoreImpl::nameOf(const std::string& address) {
     auto it = m_cat.profiles.find(address);
     std::string n = it == m_cat.profiles.end() ? "" : it->second.value("name", "");
     return n.empty() ? address.substr(0, 10) : n;
+}
+// Every blob this node is responsible for uploading: its own versions' files, images and
+// fingerprints, and the photos of its makes.
+std::set<std::string> SwampCoreImpl::myBlobs() {
+    std::set<std::string> out;
+    for (const auto& [id, m] : m_cat.models) {
+        if (m.creator == m_id.address)
+            for (const auto& v : m.versions) {
+                for (const char* k : {"files", "images"}) if (v.contains(k)) for (const auto& f : v[k]) out.insert(f.value("sha256", ""));
+                if (v.contains("fp") && v["fp"].is_object()) out.insert(v["fp"].value("sha256", ""));
+            }
+        for (const auto& mk : m.makes)
+            if (mk.value("author", "") == m_id.address && mk.contains("images"))
+                for (const auto& im : mk["images"]) out.insert(im.value("sha256", ""));
+    }
+    out.erase("");
+    return out;
 }
 
 json SwampCoreImpl::card(const Model& m) {
@@ -238,10 +293,38 @@ void SwampCoreImpl::sendFrame(const json& frame) {
     catch (const std::exception& e) { fprintf(stderr, "[swamp] send failed: %s\n", e.what()); }
 }
 
-void SwampCoreImpl::onFrame(const std::string& topic, const std::string& payloadB64) {
+// A catch-up frame from the wire, checked before logos_sync::catchup::respond() touches it
+// (respond() assumes well-formed input and throws on anything else).
+static bool wellFormedCatchup(const json& f) {
+    auto strArr = [](const json& a, size_t max) {
+        if (!a.is_array() || a.size() > max) return false;
+        for (const auto& x : a) if (!x.is_string() || x.get_ref<const std::string&>().size() > 128) return false;
+        return true;
+    };
+    for (const char* k : {"from", "lo", "hi"}) if (f.contains(k) && !f[k].is_string()) return false;
+    const std::string t = str(f, "t");
+    if (t == "fp") {
+        if (!f.contains("fps") || !f.contains("bounds") || !strArr(f["fps"], 64) || !strArr(f["bounds"], 64)) return false;
+        return !f["fps"].empty() && f["bounds"].size() + 1 == f["fps"].size();
+    }
+    if (t == "ids" || t == "need") return f.contains("ids") && strArr(f["ids"], 512);
+    return false;
+}
+
+// Message timestamps come in s, ms, us or ns depending on the layer; 0 = unknown.
+static long long toMs(int64_t t) {
+    if (t <= 0) return 0;
+    if (t > 100000000000000000LL) return t / 1000000;
+    if (t > 100000000000000LL) return t / 1000;
+    if (t > 100000000000LL) return t;
+    return t * 1000;
+}
+
+void SwampCoreImpl::onFrame(const std::string& topic, const std::string& payloadB64, int64_t sentAt) {
     if (topic != CATALOG_TOPIC) return;
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     m_rx++;
+    if (payloadB64.size() > 512 * 1024) { m_rxBad++; return; }
     std::string s = payloadB64, dec;
     json f;
     for (int i = 0; i < 3; i++) {
@@ -251,19 +334,80 @@ void SwampCoreImpl::onFrame(const std::string& topic, const std::string& payload
         s = dec;
     }
     if (!f.is_object()) { m_rxBad++; return; }
-    const std::string t = f.value("t", "");
-    if (t == "ev" && f.contains("e")) {
-        if (ingest(logos_sync::eventFromJson(f["e"]))) { m_rxEvents++; refold(); saveLog(); publishState(); }
-    } else if (t == "fp" || t == "ids" || t == "need") {
+    long long at = toMs(sentAt);
+    bool live = at == 0 || nowMs() - at < kCatchupMaxAgeMs;
+    try { handleFrame(f, live); }
+    catch (const std::exception& e) { m_rxBad++; fprintf(stderr, "[swamp] bad frame dropped: %s\n", e.what()); }
+}
+
+void SwampCoreImpl::handleFrame(const json& f, bool live) {
+    const std::string t = str(f, "t");
+    if (t == "ev" || t == "evs") {
+        json list = t == "ev" ? json::array({f.value("e", json())}) : f.value("es", json::array());
+        if (!list.is_array()) { m_rxBad++; return; }
+        for (const auto& j : list) {
+            Event e;
+            if (!eventFrom(j, e)) { m_rxBad++; continue; }
+            if (ingest(e)) m_rxEvents++;
+        }
+    } else if (wellFormedCatchup(f)) {
+        // Store replays old catch-up requests on every (re)connect: answering them is pure cost.
+        // Events always count, whatever their age.
+        if (!live) { m_staleCatchup++; return; }
+        // A peer's opening fp gets one answer per kAnswerEveryMs; its follow-ups (ids/need) always do.
+        const std::string from = str(f, "from");
+        long long now = nowMs();
+        if (str(f, "t") == "fp" && !f.contains("lo") && !f.contains("hi")) {
+            auto a = m_answeredAt.find(from);
+            if (a != m_answeredAt.end() && now - a->second < kAnswerEveryMs) { m_throttled++; return; }
+            m_answeredAt[from] = now;
+        }
         auto step = logos_sync::catchup::respond(m_log, f, m_id.address);
         for (const auto& r : step.replies) sendFrame(r);
-        for (const auto& e : step.serve) sendFrame(json{{"t", "ev"}, {"e", logos_sync::eventToJson(e)}});
+        serveEvents(step.serve);
+    } else m_rxBad++;
+}
+
+// Serve what a peer asked for in batches, within a budget: every node answering every request at
+// full speed would flood the topic (and spend the RLN allowance). Anything cut off is asked
+// for again in the peer's next catch-up round.
+void SwampCoreImpl::serveEvents(const std::vector<Event>& evs) {
+    long long now = nowMs();
+    if (now - m_serveWindow > kServeWindowMs) { m_serveWindow = now; m_servedInWindow = 0; }
+    json batch = json::array();
+    size_t bytes = 0;
+    auto flush = [&] { if (!batch.empty()) sendFrame(json{{"t", "evs"}, {"es", batch}}); batch = json::array(); bytes = 0; };
+    for (const auto& e : evs) {
+        if (m_servedInWindow >= kServePerWindow) { m_throttled += 1; continue; }
+        json j = logos_sync::eventToJson(e);
+        size_t n = j.dump().size();
+        if (bytes + n > kFrameBytes) flush();
+        batch.push_back(std::move(j));
+        bytes += n;
+        m_servedInWindow++;
+        m_servedEvents++;
     }
+    flush();
 }
 
 void SwampCoreImpl::catchupRound() {
     m_lastCatchup = nowMs();
     sendFrame(logos_sync::catchup::buildInitial(m_log, m_id.address));
+}
+
+// loam_core reports "Connected" by event; the event can arrive before we subscribed or get lost,
+// so tick() also asks for the status until we're ready.
+void SwampCoreImpl::onStatus(const std::string& s) {
+    if (s.empty()) return;
+    m_status = s;
+    if (s == "Connected" && !m_ready) {
+        m_ready = true;
+        try { modules().loam_core.joinAsync(CATALOG_TOPIC, [](std::string) {}); } catch (...) {}
+        for (int ms : {3000, 10000, 25000}) QTimer::singleShot(ms, m_timer, [this] { std::lock_guard<std::recursive_mutex> l(m_mtx); catchupRound(); });
+    } else if (s == "Connected") {
+        catchupRound();
+    }
+    publishState();
 }
 
 void SwampCoreImpl::startTransport() {
@@ -275,24 +419,18 @@ void SwampCoreImpl::startTransport() {
         if (p.is_object()) cfg = p;
     }
     try {
-        modules().loam_core.onReceived([this](const std::string& topic, const std::string&, const std::string& payloadB64, int64_t) {
-            onFrame(topic, payloadB64);
+        // callbacks arrive on the IPC thread: hand the work to the module's loop
+        auto life = m_life;
+        modules().loam_core.onReceived([this, life](const std::string& topic, const std::string&, const std::string& payloadB64, int64_t at) {
+            if (*life) onLoop([this, life, topic, payloadB64, at] { if (*life) onFrame(topic, payloadB64, at); });
         });
-        modules().loam_core.onStatusChanged([this](const std::string& s) {
-            std::lock_guard<std::recursive_mutex> lk(m_mtx);
-            m_status = s;
-            if (s == "Connected" && !m_ready) {
-                m_ready = true;
-                modules().loam_core.joinAsync(CATALOG_TOPIC, [](std::string) {});
-                for (int ms : {3000, 10000, 25000}) QTimer::singleShot(ms, m_timer, [this] { std::lock_guard<std::recursive_mutex> l(m_mtx); catchupRound(); });
-            } else if (s == "Connected") {
-                catchupRound();
-            }
-            publishState();
+        modules().loam_core.onStatusChanged([this, life](const std::string& s) {
+            if (*life) onLoop([this, life, s] { std::lock_guard<std::recursive_mutex> lk(m_mtx); if (*life) onStatus(s); });
         });
         modules().loam_core.setSenderIdAsync(m_id.address, [](std::string) {});
-        modules().loam_core.startAsync(cfg.dump(), [this](std::string err) {
-            if (!err.empty()) { std::lock_guard<std::recursive_mutex> lk(m_mtx); m_status = "Transport error: " + err; publishState(); }
+        modules().loam_core.startAsync(cfg.dump(), [this, life](std::string err) {
+            if (!*life || err.empty() || err == "{}" || err.find("\"ok\":true") != std::string::npos) return;
+            onLoop([this, err] { std::lock_guard<std::recursive_mutex> lk(m_mtx); if (!m_ready) { m_status = "Transport error: " + err; publishState(); } });
         });
         m_status = "Connecting...";
     } catch (const std::exception& e) {
@@ -305,156 +443,281 @@ void SwampCoreImpl::ensureStorage() {
     if (m_storageStarted) return;
     m_storageStarted = true;
     try {
-        modules().storage_module.onStorageUploadDone([this](const std::string& payload) {
-            onLoop([this, payload] { std::lock_guard<std::recursive_mutex> lk(m_mtx); completeUpload(payload); });
+        auto life = m_life;
+        modules().storage_module.onStorageUploadDone([this, life](const std::string& payload) {
+            if (*life) onLoop([this, payload] { std::lock_guard<std::recursive_mutex> lk(m_mtx); completeUpload(payload); });
         });
-        modules().storage_module.onStorageDownloadDone([this](const std::string& payload) {
-            onLoop([this, payload] {
+        modules().storage_module.onStorageDownloadDone([this, life](const std::string& payload) {
+            if (*life) onLoop([this, payload] {
                 std::lock_guard<std::recursive_mutex> lk(m_mtx);
                 json p = json::parse(payload, nullptr, false);
-                if (p.is_object()) completeDownload(p.value("sessionId", ""), p.value("success", false), p.value("error", ""));
+                if (p.is_object()) completeDownload(str(p, "sessionId"), flag(p, "success"), str(p, "error"));
             });
         });
-        // Basecamp 0.3 / logosctl own the Storage node: init() is refused and we adopt it as-is.
+        // Basecamp 0.3 / logosctl own the Storage node and configure it from the host's
+        // ~/.logos_storage/config.json. We never init() it - a successful init() would replace the
+        // host's config for every module. Only with an explicit SWAMP_STORAGE_CFG (a host that
+        // doesn't run Storage itself) do we configure the node.
+        const char* own = getenv("SWAMP_STORAGE_CFG");
         bool inited = false;
-        try { inited = modules().storage_module.init(json::object().dump()); } catch (...) { inited = false; }
+        if (own && *own) {
+            json cfg = json::parse(std::string(own), nullptr, false);
+            if (cfg.is_object()) { try { inited = modules().storage_module.init(cfg.dump()); } catch (...) { inited = false; } }
+        }
         m_storageHostOwned = !inited;
         try { modules().storage_module.start(); } catch (...) {}
-        fprintf(stderr, "[swamp] storage: %s\n", m_storageHostOwned ? "using the host's node" : "initialised our own node");
+        fprintf(stderr, "[swamp] storage: %s\n", m_storageHostOwned ? "using the host's node" : "configured from SWAMP_STORAGE_CFG");
     } catch (const std::exception& e) {
         fprintf(stderr, "[swamp] storage unavailable: %s\n", e.what());
     }
 }
 
+bool SwampCoreImpl::storageFree() {
+    if (m_storageBusy && nowMs() - m_storageBusySince > 2LL * kStorageTimeoutMs) m_storageBusy = false;   // a lost callback
+    if (m_storageBusy) return false;
+    m_storageBusy = true;
+    m_storageBusySince = nowMs();
+    return true;
+}
+void SwampCoreImpl::storageDone() { m_storageBusy = false; }
+
 void SwampCoreImpl::uploadBlob(const std::string& sha) {
+    if (m_myCids.count(sha) || !haveBlob(sha)) return;
     for (const auto& [sess, u] : m_upSessions) if (u.sha == sha) return;
+    if (!storageFree()) return;   // retryUploads() comes back next tick
+    m_upTried[sha] = nowMs();
     try {
-        StdLogosResult r = modules().storage_module.uploadUrl(blobPath(sha), 65536, true);
-        if (!r.success) { fprintf(stderr, "[swamp] upload %s rejected: %s\n", sha.substr(0, 12).c_str(), r.error.c_str()); return; }
-        m_upSessions[resVal(r)] = PendingUpload{sha, blobPath(sha), nowMs()};
-    } catch (const std::exception& e) { fprintf(stderr, "[swamp] upload failed: %s\n", e.what()); }
+        modules().storage_module.uploadUrlAsyncResult(blobPath(sha), 65536, true,
+            [this, life = m_life, sha](logos::AsyncResult<StdLogosResult> ar) {
+                if (*life) onLoop([this, ar, sha] {
+                    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+                    storageDone();
+                    // a timeout may mean "still running": the manifest poll finds it by file name
+                    if (!ar.ok()) { m_upSessions["?" + sha] = PendingUpload{sha, nowMs()}; return; }
+                    if (!ar.value.success || resVal(ar.value).empty()) {
+                        fprintf(stderr, "[swamp] upload %s refused: %s (retrying later)\n", sha.substr(0, 12).c_str(), ar.value.error.c_str());
+                        return;
+                    }
+                    m_upSessions[resVal(ar.value)] = PendingUpload{sha, nowMs()};
+                });
+            }, kStorageTimeoutMs);
+    } catch (const std::exception& e) { storageDone(); fprintf(stderr, "[swamp] upload failed: %s\n", e.what()); }
 }
 
 void SwampCoreImpl::completeUpload(const std::string& payload) {
     json p = json::parse(payload, nullptr, false);
     if (!p.is_object()) return;
-    auto it = m_upSessions.find(p.value("sessionId", ""));
+    auto it = m_upSessions.find(str(p, "sessionId"));
     if (it == m_upSessions.end()) return;
     std::string sha = it->second.sha;
     m_upSessions.erase(it);
-    if (!p.value("success", false)) { fprintf(stderr, "[swamp] upload of %s failed: %s\n", sha.substr(0, 12).c_str(), p.value("error", "").c_str()); return; }
-    std::string cid = p.value("cid", "");
-    if (cid.empty()) return;
+    std::string cid = str(p, "cid");
+    if (!flag(p, "success") || cid.empty()) {
+        fprintf(stderr, "[swamp] upload of %s failed: %s (retrying later)\n", sha.substr(0, 12).c_str(), str(p, "error").c_str());
+        return;
+    }
     m_uploaded++;
     m_myCids[sha] = cid;
+    m_toAnnounce[sha] = cid;
     saveJobs();
-    announceCids({{sha, cid}});
 }
 
-void SwampCoreImpl::announceCids(const std::map<std::string, std::string>& cids) {
-    json m = json::object();
-    for (const auto& [sha, cid] : cids) {
-        auto it = m_cat.cids.find(sha);
-        if (it != m_cat.cids.end() && std::find(it->second.begin(), it->second.end(), cid) != it->second.end()) continue;
-        m[sha] = cid;
+// Retry any of my blobs that has no CID and no upload in flight (refused, failed, timed out, or
+// the app closed mid-upload).
+void SwampCoreImpl::retryUploads() {
+    long long now = nowMs();
+    for (const auto& sha : myBlobs()) {
+        if (m_myCids.count(sha)) continue;
+        auto t = m_upTried.find(sha);
+        if (t != m_upTried.end() && now - t->second < kUploadRetryMs) continue;
+        uploadBlob(sha);
     }
-    if (!m.empty()) { author("blob.cids", json{{"cids", m}}); publishState(); }
 }
 
-// Fetch one blob into the local cache: try its candidate CIDs in order; verify the hash.
+// CIDs go out as one blob.cids event per batch, not one per upload, and a CID the catalogue still
+// lacks is re-announced at most every kReannounceMs (the fold may legitimately drop it).
+void SwampCoreImpl::flushAnnouncements() {
+    if (!m_ready) return;
+    long long now = nowMs();
+    for (const auto& [sha, cid] : m_myCids) {
+        auto it = m_cat.cids.find(sha);
+        bool known = it != m_cat.cids.end() && std::find(it->second.begin(), it->second.end(), cid) != it->second.end();
+        if (known) continue;
+        auto a = m_announcedAt.find(sha);
+        if (a == m_announcedAt.end() || now - a->second > kReannounceMs) m_toAnnounce[sha] = cid;
+    }
+    if (m_toAnnounce.empty()) { m_announceHeldSince = 0; return; }
+    // while more of my uploads are still finishing, wait a little so they share one event
+    bool more = !m_upSessions.empty();
+    for (const auto& sha : myBlobs()) if (!more && !m_myCids.count(sha)) more = true;
+    if (!m_announceHeldSince) m_announceHeldSince = now;
+    if (more && now - m_announceHeldSince < kAnnounceHoldMs) return;
+    m_announceHeldSince = 0;
+    while (!m_toAnnounce.empty()) {
+        json m = json::object();
+        for (auto it = m_toAnnounce.begin(); it != m_toAnnounce.end() && m.size() < kCidsPerEvent;) {
+            m[it->first] = it->second;
+            m_announcedAt[it->first] = now;
+            it = m_toAnnounce.erase(it);
+        }
+        author("blob.cids", json{{"cids", m}});
+    }
+    publishState();
+}
+
+static long long backoffMs(int rounds) { return std::min<long long>(30000LL << std::min(rounds, 6), 30LL * 60 * 1000); }
+
+static bool sha256File(const std::string& path, std::string& hex) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+    std::vector<char> buf(1 << 16);
+    while (f) {
+        f.read(buf.data(), buf.size());
+        if (f.gcount() > 0) EVP_DigestUpdate(ctx, buf.data(), (size_t)f.gcount());
+    }
+    unsigned char md[32]; unsigned int n = 0;
+    EVP_DigestFinal_ex(ctx, md, &n);
+    EVP_MD_CTX_free(ctx);
+    static const char* X = "0123456789abcdef";
+    hex.clear();
+    for (unsigned i = 0; i < n; i++) { hex += X[md[i] >> 4]; hex += X[md[i] & 15]; }
+    return true;
+}
+
+// Fetch one blob into the local cache: try its candidate CIDs in turn, verify the hash, back off
+// between full rounds. `size` is the size the signed version declares; a transfer that grows past
+// it is cut off.
 void SwampCoreImpl::startFetch(const std::string& sha, long long size) {
-    if (haveBlob(sha) || m_fetching.count(sha)) return;
+    if (haveBlob(sha) || size <= 0 || size > MAX_FILE_BYTES) return;
     auto it = m_cat.cids.find(sha);
     if (it == m_cat.cids.end() || it->second.empty()) return;
-    size_t idx = 0;
-    auto g = m_fetchGaveUp.find(sha);
-    if (g != m_fetchGaveUp.end()) idx = (size_t)g->second;
-    if (idx >= it->second.size()) return;
-    std::string cid = it->second[idx];
+    Fetch& F = m_fetch[sha];
+    long long now = nowMs();
+    if (F.inflight || F.gaveUp || now < F.nextTry) return;
+    int inflight = 0;
+    for (const auto& [s, f] : m_fetch) inflight += f.inflight;
+    if (inflight >= kMaxFetches || !storageFree()) return;
+    if (F.cidIdx >= it->second.size()) F.cidIdx = 0;
+    std::string cid = it->second[F.cidIdx];
     std::string part = m_dataDir + "/parts/" + sha;
-    m_fetching.insert(sha);
+    std::error_code ec; fs::remove(part, ec);
+    F.inflight = true; F.since = now; F.size = size; F.cid = cid; F.session.clear(); F.seenSize = 0; F.grewAt = now;
+    long long attempt = now;
     try {
         modules().storage_module.downloadToUrlAsyncResult(cid, part, false, 65536, false, true,
-            [this, sha, cid, part, size, idx](logos::AsyncResult<StdLogosResult> ar) {
-                onLoop([this, ar, sha, cid, part, size, idx] {
+            [this, life = m_life, sha, attempt](logos::AsyncResult<StdLogosResult> ar) {
+                if (*life) onLoop([this, ar, sha, attempt] {
                     std::lock_guard<std::recursive_mutex> lk(m_mtx);
-                    StdLogosResult r = ar.value;
-                    if (!ar.ok() || !r.success) {
-                        // a timeout may mean "still running"; the poll catches a finished file
-                        m_downSessions["?" + sha] = PendingDownload{sha, cid, part, size, nowMs(), idx};
-                        return;
-                    }
-                    m_downSessions[resVal(r)] = PendingDownload{sha, cid, part, size, nowMs(), idx};
+                    storageDone();
+                    auto fi = m_fetch.find(sha);
+                    if (fi == m_fetch.end() || !fi->second.inflight || fi->second.since != attempt) return;   // stale
+                    if (!ar.ok()) return;   // a timeout may mean "still running": pollStorage watches the file
+                    if (!ar.value.success) { fetchFailed(sha, ar.value.error.empty() ? "Storage refused the download" : ar.value.error); return; }
+                    fi->second.session = resVal(ar.value);
                 });
             }, kStorageTimeoutMs);
     } catch (const std::exception& e) {
-        m_fetching.erase(sha);
-        fprintf(stderr, "[swamp] download failed to start: %s\n", e.what());
+        storageDone();
+        fetchFailed(sha, std::string("download failed to start: ") + e.what());
     }
+}
+
+void SwampCoreImpl::fetchFailed(const std::string& sha, const std::string& why) {
+    auto fi = m_fetch.find(sha);
+    if (fi == m_fetch.end()) return;
+    Fetch& F = fi->second;
+    std::string sess = F.session.empty() ? F.cid : F.session;
+    if (F.inflight && !sess.empty()) { try { modules().storage_module.downloadCancelAsyncResult(sess, [](logos::AsyncResult<StdLogosResult>) {}, kStorageTimeoutMs); } catch (...) {} }
+    std::error_code ec; fs::remove(m_dataDir + "/parts/" + sha, ec);
+    F.inflight = false; F.session.clear(); F.error = why;
+    fprintf(stderr, "[swamp] fetch %s: %s\n", sha.substr(0, 12).c_str(), why.c_str());
+    auto it = m_cat.cids.find(sha);
+    size_t n = it == m_cat.cids.end() ? 0 : it->second.size();
+    if (++F.cidIdx >= n) { F.cidIdx = 0; F.rounds++; F.nextTry = nowMs() + backoffMs(F.rounds); }
+    else F.nextTry = 0;   // another candidate: try it straight away
 }
 
 void SwampCoreImpl::completeDownload(const std::string& sessionId, bool success, const std::string& error) {
-    auto it = m_downSessions.find(sessionId);
-    if (it == m_downSessions.end()) return;
-    PendingDownload d = it->second;
-    m_downSessions.erase(it);
-    m_fetching.erase(d.sha);
-    if (!success) {
-        fprintf(stderr, "[swamp] download %s failed: %s\n", d.sha.substr(0, 12).c_str(), error.c_str());
-        m_fetchGaveUp[d.sha] = (long long)d.cidIndex + 1;   // next candidate CID next time
+    if (sessionId.empty()) return;
+    // storage 3.x: the download session id is the CID, and the done event can beat the
+    // AsyncResult that tells us the session id - match either
+    for (auto& [sha, F] : m_fetch) {
+        if (!F.inflight || (F.session != sessionId && F.cid != sessionId)) continue;
+        if (success) finishFetched(sha);
+        else fetchFailed(sha, error.empty() ? "download failed" : error);
         return;
     }
-    finishFetched(d.sha);
 }
 
 void SwampCoreImpl::finishFetched(const std::string& sha) {
-    std::string part = m_dataDir + "/parts/" + sha, bytes;
-    if (!readFile(part, bytes)) return;
+    std::string part = m_dataDir + "/parts/" + sha, got;
     std::error_code ec;
-    if (sha256Hex(bytes) != sha) {
+    long long sz = fs::exists(part, ec) ? (long long)fs::file_size(part, ec) : -1;
+    auto fi = m_fetch.find(sha);
+    long long want = fi == m_fetch.end() ? 0 : fi->second.size;
+    if (sz != want || !sha256File(part, got) || got != sha) {
         m_verifyFailed++;
-        fs::remove(part, ec);
-        auto& gi = m_fetchGaveUp[sha];
-        gi = gi + 1;   // this CID served the wrong bytes: try the next candidate
-        fprintf(stderr, "[swamp] %s: downloaded bytes don't match the hash - rejected\n", sha.substr(0, 12).c_str());
+        fetchFailed(sha, "the downloaded bytes don't match the published hash - rejected");
         return;
     }
     fs::rename(part, blobPath(sha), ec);
+    if (ec) { fetchFailed(sha, "couldn't store the file: " + ec.message()); return; }
     m_fetched++;
-    m_fetching.erase(sha);
+    m_fetch.erase(sha);
     publishState();
 }
 
 // Storage done-events can be lost: read the same facts back (upload: the manifest of our staged
-// file name; download: the part file reached the expected size).
+// file name; download: the part file reached the declared size).
 void SwampCoreImpl::pollStorage() {
     long long now = nowMs();
-    if (!m_upSessions.empty()) {
+    if (!m_upSessions.empty() && now - m_lastManifestPoll > kManifestPollMs && storageFree()) {
+        m_lastManifestPoll = now;
         try {
-            StdLogosResult r = modules().storage_module.manifests();
-            json arr = r.value;
-            if (arr.is_string()) arr = json::parse(arr.get<std::string>(), nullptr, false);
-            if (r.success && arr.is_array()) {
-                std::vector<std::string> done;
-                for (const auto& [sess, u] : m_upSessions)
-                    for (const auto& m : arr)
-                        if (m.is_object() && m.value("filename", "") == u.sha && !m.value("cid", "").empty())
-                            done.push_back(json{{"sessionId", sess}, {"success", true}, {"cid", m.value("cid", "")}}.dump());
-                for (const auto& d : done) completeUpload(d);
-            }
-        } catch (...) {}
+            modules().storage_module.manifestsAsyncResult([this, life = m_life](logos::AsyncResult<StdLogosResult> ar) {
+                if (*life) onLoop([this, ar] {
+                    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+                    storageDone();
+                    if (!ar.ok() || !ar.value.success) return;
+                    json arr = ar.value.value;
+                    if (arr.is_string()) arr = json::parse(arr.get<std::string>(), nullptr, false);
+                    if (!arr.is_array()) return;
+                    std::vector<std::string> done;
+                    for (const auto& [sess, u] : m_upSessions)
+                        for (const auto& m : arr)
+                            if (m.is_object() && str(m, "filename") == u.sha && !str(m, "cid").empty())
+                                done.push_back(json{{"sessionId", sess}, {"success", true}, {"cid", str(m, "cid")}}.dump());
+                    for (const auto& d : done) completeUpload(d);
+                });
+            }, kStorageTimeoutMs);
+        } catch (...) { storageDone(); }
         for (auto it = m_upSessions.begin(); it != m_upSessions.end();)
             it = now - it->second.since > kTransferStaleMs ? m_upSessions.erase(it) : std::next(it);
     }
-    std::vector<std::string> finished, stale;
-    for (const auto& [sess, d] : m_downSessions) {
+    std::vector<std::pair<std::string, std::string>> failed;
+    std::vector<std::string> finished;
+    for (auto& [sha, F] : m_fetch) {
+        if (!F.inflight) continue;
         std::error_code ec;
-        auto sz = fs::exists(d.part, ec) ? (long long)fs::file_size(d.part, ec) : -1;
-        if (d.size > 0 && sz == d.size) finished.push_back(sess);
-        else if (now - d.since > kTransferStaleMs) stale.push_back(sess);
+        std::string part = m_dataDir + "/parts/" + sha;
+        long long sz = fs::exists(part, ec) ? (long long)fs::file_size(part, ec) : -1;
+        if (sz == F.size) finished.push_back(sha);
+        else if (sz > F.size) { m_tooBig++; failed.push_back({sha, "the download is larger than the published size - cut off"}); }
+        else if (now - F.since > kTransferStaleMs) failed.push_back({sha, "timed out"});
+        else if (sz > F.seenSize) { F.seenSize = sz; F.grewAt = now; }
+        else if (now - F.grewAt > kStallMs) { m_stalled++; failed.push_back({sha, "the transfer stalled (no holder answering)"}); }
     }
-    for (const auto& s : finished) completeDownload(s, true, "");
-    for (const auto& s : stale) completeDownload(s, false, "timed out");
+    for (const auto& s : finished) finishFetched(s);
+    for (const auto& [s, why] : failed) fetchFailed(s, why);
+}
+
+static long long declaredSize(const Catalog& cat, const std::string& modelId, int v, const std::string& sha) {
+    auto mi = cat.models.find(modelId);
+    if (mi == cat.models.end() || v < 1 || v > (int)mi->second.versions.size()) return 0;
+    for (const auto& f : mi->second.versions[v - 1]["files"]) if (f.value("sha256", "") == sha) return f.value("size", 0LL);
+    return 0;
 }
 
 void SwampCoreImpl::advanceJobs() {
@@ -462,41 +725,52 @@ void SwampCoreImpl::advanceJobs() {
     for (auto& [key, j] : m_jobs) {
         if (j.status == "done" || j.status == "failed") continue;
         size_t have = 0;
+        std::string prevStatus = j.status, prevError = j.error;
+        j.error.clear();
         for (const auto& [sha, name] : j.files) {
             if (haveBlob(sha)) { have++; continue; }
-            auto f = m_cat.cids.find(sha);
-            long long size = 0;
-            auto mi = m_cat.models.find(j.modelId);
-            if (mi != m_cat.models.end() && j.v >= 1 && j.v <= (int)mi->second.versions.size())
-                for (const auto& ff : mi->second.versions[j.v - 1]["files"]) if (ff.value("sha256", "") == sha) size = ff.value("size", 0LL);
-            if (f == m_cat.cids.end()) continue;   // no CID announced yet - keep waiting
-            startFetch(sha, size);
+            startFetch(sha, declaredSize(m_cat, j.modelId, j.v, sha));
+            auto fi = m_fetch.find(sha);
+            if (fi == m_fetch.end()) continue;
+            if (fi->second.rounds >= kJobRounds) { j.status = "failed"; j.error = "Couldn't fetch " + name + ": " + fi->second.error; break; }
+            if (!fi->second.error.empty() && j.error.empty()) j.error = "Retrying " + name + ": " + fi->second.error;
         }
-        std::string prev = j.status;
-        if (have == j.files.size()) {
-            std::error_code ec;
-            fs::create_directories(j.dir, ec);
-            for (const auto& [sha, name] : j.files) fs::copy_file(blobPath(sha), j.dir + "/" + name, fs::copy_options::overwrite_existing, ec);
-            j.status = ec ? "failed" : "done";
-            if (ec) j.error = "couldn't write to " + j.dir + ": " + ec.message();
-        } else j.status = "fetching";
-        if (j.status != prev) changed = true;
+        if (j.status != "failed") {
+            if (have == j.files.size()) {
+                std::error_code ec;
+                fs::create_directories(j.dir, ec);
+                std::string err = ec ? ec.message() : "";
+                for (const auto& [sha, name] : j.files) {
+                    if (!err.empty()) break;
+                    fs::copy_file(blobPath(sha), j.dir + "/" + name, fs::copy_options::overwrite_existing, ec);
+                    if (ec) err = name + ": " + ec.message();
+                }
+                j.status = err.empty() ? "done" : "failed";
+                j.error = err.empty() ? "" : "Couldn't write to " + j.dir + " (" + err + ")";
+            } else j.status = "fetching";
+        }
+        if (j.status != prevStatus || j.error != prevError) changed = true;
     }
     if (changed) { saveJobs(); publishState(); }
 }
 
 // Thumbnails and photos are small: fetch them eagerly so listings have pictures.
 void SwampCoreImpl::fetchPreviews() {
-    int started = 0;
+    int inflight = 0;
+    for (const auto& [s, f] : m_fetch) inflight += f.inflight;
     for (const auto& [id, m] : m_cat.models) {
         if (m.versions.empty() || m.retracted) continue;
         const json& v = m.versions.back();
         if (!v.contains("images")) continue;
         for (const auto& im : v["images"]) {
+            if (inflight >= kPreviewFetches) return;
             std::string sha = im.value("sha256", "");
-            if (im.value("size", 0LL) > 2 * 1024 * 1024 || haveBlob(sha) || m_fetching.count(sha)) continue;
-            if (started++ >= 4) return;
-            startFetch(sha, im.value("size", 0LL));
+            long long size = im.value("size", 0LL);
+            if (size > kPreviewMaxBytes || haveBlob(sha) || !m_cat.cids.count(sha)) continue;
+            auto fi = m_fetch.find(sha);
+            if (fi != m_fetch.end() && (fi->second.inflight || nowMs() < fi->second.nextTry)) continue;
+            startFetch(sha, size);
+            if (m_fetch.count(sha) && m_fetch[sha].inflight) inflight++;
         }
     }
 }
@@ -504,20 +778,19 @@ void SwampCoreImpl::fetchPreviews() {
 // A hub keeps a copy of every file it sees, so files outlive their creators' desktops.
 void SwampCoreImpl::hubSweep() {
     if (!m_hub) return;
-    int inflight = (int)m_fetching.size();
+    int inflight = 0;
+    for (const auto& [s, f] : m_fetch) inflight += f.inflight;
     for (const auto& [id, m] : m_cat.models) {
         for (const auto& v : m.versions) {
             json blobs = json::array();
             for (const char* k : {"files", "images"}) if (v.contains(k)) for (const auto& f : v[k]) blobs.push_back(f);
             if (v.contains("fp") && v["fp"].is_object()) blobs.push_back(v["fp"]);
-            {
-                for (const auto& f : blobs) {
-                    if (inflight >= kHubConcurrency) return;
-                    std::string sha = f.value("sha256", "");
-                    if (haveBlob(sha) || m_fetching.count(sha) || !m_cat.cids.count(sha)) continue;
-                    startFetch(sha, f.value("size", 0LL));
-                    inflight++;
-                }
+            for (const auto& f : blobs) {
+                if (inflight >= kHubConcurrency) return;
+                std::string sha = f.value("sha256", "");
+                if (haveBlob(sha) || !m_cat.cids.count(sha)) continue;
+                startFetch(sha, f.value("size", 0LL));
+                if (m_fetch.count(sha) && m_fetch[sha].inflight) inflight++;
             }
         }
     }
@@ -525,45 +798,45 @@ void SwampCoreImpl::hubSweep() {
 
 void SwampCoreImpl::tick() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
-    if (m_storageStarted) { pollStorage(); advanceJobs(); fetchPreviews(); hubSweep(); }
-    if (m_ready && nowMs() - m_lastCatchup > kCatchupEveryMs) catchupRound();
-    // announce CIDs we hold that the catalogue doesn't know yet (e.g. authored while offline)
-    std::map<std::string, std::string> missing;
-    for (const auto& [sha, cid] : m_myCids) {
-        auto it = m_cat.cids.find(sha);
-        if (it == m_cat.cids.end() || std::find(it->second.begin(), it->second.end(), cid) == it->second.end()) missing[sha] = cid;
+    if (!m_loaded) return;
+    try {
+        long long now = nowMs();
+        if (m_dirty) { refold(); m_unsaved = true; publishState(); }
+        if (m_unsaved && now - m_lastSave > kSaveEveryMs) saveLog();
+        if (!m_ready && m_transportStarted && now - m_lastStatusPoll > kStatusPollMs) {
+            m_lastStatusPoll = now;
+            try {
+                modules().loam_core.statusAsync([this, life = m_life](std::string s) {
+                    if (*life) onLoop([this, s] { std::lock_guard<std::recursive_mutex> l(m_mtx); if (!m_ready) onStatus(unquote(s)); });
+                });
+            } catch (...) {}
+        }
+        if (m_storageStarted) { pollStorage(); advanceJobs(); retryUploads(); fetchPreviews(); hubSweep(); }
+        flushAnnouncements();
+        if (m_ready && now - m_lastCatchup > kCatchupEveryMs) catchupRound();
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[swamp] tick: %s\n", e.what());
     }
-    if (!missing.empty() && m_ready) announceCids(missing);
 }
 
 void SwampCoreImpl::startModules() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     startTransport();
     ensureStorage();
-    // re-upload anything that never got a CID (e.g. Basecamp closed mid-upload)
-    for (const auto& [id, m] : m_cat.models) {
-        if (m.creator != m_id.address) continue;
-        for (const auto& v : m.versions) {
-            std::vector<std::string> shas;
-            for (const char* k : {"files", "images"}) if (v.contains(k)) for (const auto& f : v[k]) shas.push_back(f.value("sha256", ""));
-            if (v.contains("fp") && v["fp"].is_object()) shas.push_back(v["fp"].value("sha256", ""));
-            for (const auto& sha : shas) if (haveBlob(sha) && !m_myCids.count(sha)) uploadBlob(sha);
-        }
-    }
+    retryUploads();   // anything that never got a CID (e.g. the app closed mid-upload)
 }
 
 void SwampCoreImpl::onContextReady() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     setupDataDir();
-    loadAll();
-    refold();
     m_timer = new QTimer();
     QObject::connect(m_timer, &QTimer::timeout, m_timer, [this] { tick(); });
     int tickMs = 2000;
     if (const char* t = getenv("SWAMP_TICK_MS")) tickMs = std::max(50, atoi(t));
     m_timer->start(tickMs);
+    // loading verifies every stored signature (~0.5 ms each): do it just after the hook returns
+    QTimer::singleShot(0, m_timer, [this] { std::lock_guard<std::recursive_mutex> l(m_mtx); loadAll(); refold(); m_loaded = true; publishState(); });
     QTimer::singleShot(kStartDelayMs, m_timer, [this] { startModules(); });
-    publishState();
 }
 
 // ---- read surface -----------------------------------------------------------------------------
@@ -577,12 +850,15 @@ std::string SwampCoreImpl::snapshot() {
     json profile = pit == m_cat.profiles.end() ? json{{"name", ""}, {"bio", ""}} : pit->second;
     size_t visible = 0;
     for (const auto& [id, m] : m_cat.models) if (!m.versions.empty() && !m.retracted) visible++;
+    size_t inflight = 0;
+    for (const auto& [s, f] : m_fetch) inflight += f.inflight;
     return json{{"ok", true}, {"version", SWAMP_VERSION}, {"status", m_status}, {"hub", m_hub},
                 {"me", {{"address", m_id.address}, {"profile", profile}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
                 {"catalog", {{"events", m_log.size()}, {"models", visible}, {"rejected", m_cat.rejected}, {"cids", m_cat.cids.size()}}},
                 {"counters", {{"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
-                              {"fetched", m_fetched}, {"verifyFailed", m_verifyFailed}, {"uploading", m_upSessions.size()}, {"downloading", m_fetching.size()}}}}.dump();
+                              {"fetched", m_fetched}, {"verifyFailed", m_verifyFailed}, {"tooBig", m_tooBig}, {"served", m_servedEvents}, {"throttled", m_throttled}, {"staleCatchup", m_staleCatchup}, {"stalled", m_stalled},
+                              {"uploading", m_upSessions.size()}, {"downloading", inflight}, {"toAnnounce", m_toAnnounce.size()}}}}.dump();
 }
 
 std::string SwampCoreImpl::resync() {
@@ -595,9 +871,9 @@ std::string SwampCoreImpl::listModels(std::string queryJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     json q = parseArg(queryJson);
     if (!q.is_object()) q = json::object();
-    std::string text = q.value("q", ""), tag = q.value("tag", ""), sort = q.value("sort", "new");
-    bool mineOnly = q.value("mine", false);
-    size_t limit = (size_t)std::max(1, std::min(500, q.value("limit", 100)));
+    std::string text = str(q, "q"), tag = str(q, "tag"), sort = (str(q, "sort").empty() ? std::string("new") : str(q, "sort"));
+    bool mineOnly = flag(q, "mine");
+    size_t limit = (size_t)std::max(1, std::min(500, (int)std::max(-1000LL, std::min(1000LL, num(q, "limit", 100)))));
     std::vector<const Model*> hits;
     for (const auto& [id, m] : m_cat.models) {
         if (m.versions.empty() || m.retracted) continue;
@@ -637,7 +913,9 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
                 std::string sha = f.value("sha256", "");
                 f["local"] = haveBlob(sha) ? json(blobPath(sha)) : json(nullptr);
                 f["cids"] = m_cat.cids.count(sha) ? m_cat.cids.at(sha).size() : 0;
-                f["fetching"] = m_fetching.count(sha) > 0;
+                auto fi = m_fetch.find(sha);
+                f["fetching"] = fi != m_fetch.end() && fi->second.inflight;
+                if (fi != m_fetch.end() && !fi->second.error.empty()) f["fetchError"] = fi->second.error;
             }
         }
         vv.erase("fp");
@@ -675,10 +953,11 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
 // ---- creators -------------------------------------------------------------------------------
 std::string SwampCoreImpl::publish(std::string draftJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
     json d = parseArg(draftJson);
     if (!d.is_object()) return fail("The draft is not valid JSON");
     if (!d.contains("files") || !d["files"].is_array() || d["files"].empty()) return fail("Add at least one file");
-    std::string modelId = d.value("modelId", "");
+    std::string modelId = str(d, "modelId");
     const Model* existing = nullptr;
     if (!modelId.empty()) {
         auto it = m_cat.models.find(modelId);
@@ -690,12 +969,13 @@ std::string SwampCoreImpl::publish(std::string draftJson) {
     json files = json::array(), images = json::array();
     std::vector<double> firstMesh;
     for (const auto& f : d["files"]) {
-        std::string path = f.value("path", ""), bytes;
+        if (!f.is_object()) return fail("Each file needs a path");
+        std::string path = str(f, "path"), bytes;
         if (!readFile(path, bytes) || bytes.empty()) return fail("Can't read " + path);
         std::string name = fs::path(path).filename().string();
         if (!safeName(name)) return fail("Unsupported file name: " + name);
         std::string sha = storeBlob(bytes);
-        std::string kind = f.value("kind", "");
+        std::string kind = str(f, "kind");
         std::string ext = lowerExt(name);
         if (kind.empty()) kind = (ext == "stl" || ext == "3mf" || ext == "obj") ? "model" : (ext == "step" || ext == "stp" || ext == "scad" || ext == "f3d") ? "source" : "other";
         files.push_back({{"name", name}, {"kind", kind}, {"size", (long long)bytes.size()}, {"sha256", sha}});
@@ -703,11 +983,12 @@ std::string SwampCoreImpl::publish(std::string draftJson) {
     }
     if (d.contains("images") && d["images"].is_array())
         for (const auto& im : d["images"]) {
-            std::string path = im.value("path", ""), bytes;
+            if (!im.is_object()) return fail("Each image needs a path");
+            std::string path = str(im, "path"), bytes;
             if (!readFile(path, bytes) || bytes.empty()) return fail("Can't read image " + path);
             std::string mime = sniffImage(bytes);
             if (mime.empty()) return fail("Images must be PNG, JPEG or WebP");
-            images.push_back({{"kind", im.value("kind", "photo")}, {"size", (long long)bytes.size()}, {"sha256", storeBlob(bytes)}, {"mime", mime}});
+            images.push_back({{"kind", (str(im, "kind").empty() ? std::string("photo") : clip(im, "kind", 16))}, {"size", (long long)bytes.size()}, {"sha256", storeBlob(bytes)}, {"mime", mime}});
         }
     json fpj = nullptr;
     if (!firstMesh.empty()) {
@@ -725,33 +1006,28 @@ std::string SwampCoreImpl::publish(std::string draftJson) {
             fpj = json{{"v", fp::VERSION}, {"sha256", fsha}, {"size", (long long)full.dump().size()}, {"d2", d2}, {"a3", a3}};
         } catch (const std::exception& e) { fprintf(stderr, "[swamp] fingerprint/thumbnail skipped: %s\n", e.what()); }
     }
-    if (modelId.empty()) {
-        std::string nonce = newId();
-        modelId = modelIdFor(m_id.address, nonce);
-        author("model.create", json{{"modelId", modelId}, {"nonce", nonce}, {"title", d.value("title", "")}});
-    }
+    std::string nonce;
+    if (modelId.empty()) { nonce = newId(); modelId = modelIdFor(m_id.address, nonce); }
     int v = existing ? (int)existing->versions.size() + 1 : 1;
-    json ver{{"modelId", modelId}, {"v", v}, {"title", d.value("title", "")}, {"summary", d.value("summary", "")},
-             {"description", d.value("description", "")}, {"tags", d.value("tags", json::array())},
-             {"licence", d.value("licence", "")}, {"parents", d.value("parents", json::array())},
+    json ver{{"modelId", modelId}, {"v", v}, {"title", str(d, "title")}, {"summary", str(d, "summary")},
+             {"description", str(d, "description")}, {"tags", d.contains("tags") ? d["tags"] : json::array()},
+             {"licence", str(d, "licence")}, {"parents", d.contains("parents") ? d["parents"] : json::array()},
              {"files", files}, {"images", images}};
     if (!fpj.is_null()) ver["fp"] = fpj;
     std::string why = validateVersion(ver);
     if (!why.empty()) return fail(why);
     if (ver.dump().size() > MAX_PAYLOAD) return fail("The description and metadata are too long");
+    // only now, with a version known to be valid, does the model come into existence
+    if (!nonce.empty()) author("model.create", json{{"modelId", modelId}, {"nonce", nonce}, {"title", str(d, "title")}});
     author("model.version", ver);
-    // uploads run in the background; CIDs are announced as they complete
-    std::vector<std::string> shas;
-    for (const auto& f : files) shas.push_back(f.value("sha256", ""));
-    for (const auto& f : images) shas.push_back(f.value("sha256", ""));
-    if (!fpj.is_null()) shas.push_back(fpj.value("sha256", ""));
-    if (m_storageStarted) for (const auto& s : shas) if (!m_myCids.count(s)) uploadBlob(s);
+    // uploads start from tick() (retryUploads), never on this IPC call; CIDs are announced in batches
     publishState();
     return ok(json{{"modelId", modelId}, {"v", v}});
 }
 
 std::string SwampCoreImpl::retract(std::string modelId, std::string reason) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
     modelId = unquote(modelId);
     auto it = m_cat.models.find(modelId);
     if (it == m_cat.models.end()) return fail("No such model");
@@ -763,6 +1039,7 @@ std::string SwampCoreImpl::retract(std::string modelId, std::string reason) {
 // ---- makers ---------------------------------------------------------------------------------
 std::string SwampCoreImpl::download(std::string modelId, std::string version) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
     modelId = unquote(modelId);
     auto it = m_cat.models.find(modelId);
     if (it == m_cat.models.end() || it->second.versions.empty()) return fail("No such model");
@@ -773,7 +1050,12 @@ std::string SwampCoreImpl::download(std::string modelId, std::string version) {
     DownloadJob j;
     j.modelId = modelId; j.v = v; j.status = "queued";
     j.dir = m_downloadsDir + "/" + safeDirName(ver.value("title", "model")) + "-" + modelId.substr(0, 8) + "-v" + std::to_string(v);
-    for (const auto& f : ver["files"]) j.files.push_back({f.value("sha256", ""), f.value("name", "")});
+    for (const auto& f : ver["files"]) {
+        std::string sha = f.value("sha256", "");
+        j.files.push_back({sha, f.value("name", "")});
+        auto fi = m_fetch.find(sha);   // asking again starts over: fresh rounds, no back-off
+        if (fi != m_fetch.end() && !fi->second.inflight) m_fetch.erase(fi);
+    }
     m_jobs[modelId + "@" + std::to_string(v)] = j;
     saveJobs();
     advanceJobs();
@@ -782,6 +1064,7 @@ std::string SwampCoreImpl::download(std::string modelId, std::string version) {
 
 std::string SwampCoreImpl::comment(std::string modelId, std::string text) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
     modelId = unquote(modelId); text = unquote(text);
     if (!m_cat.models.count(modelId)) return fail("No such model");
     if (text.empty() || text.size() > 4000) return fail("Comments are 1-4000 characters");
@@ -791,6 +1074,7 @@ std::string SwampCoreImpl::comment(std::string modelId, std::string text) {
 
 std::string SwampCoreImpl::postMake(std::string modelId, std::string makeJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
     modelId = unquote(modelId);
     if (!m_cat.models.count(modelId)) return fail("No such model");
     json mk = parseArg(makeJson);
@@ -804,9 +1088,8 @@ std::string SwampCoreImpl::postMake(std::string modelId, std::string makeJson) {
             if (mime.empty()) return fail("Photos must be PNG, JPEG or WebP");
             std::string sha = storeBlob(bytes);
             imgs.push_back({{"sha256", sha}, {"size", (long long)bytes.size()}, {"mime", mime}});
-            if (m_storageStarted) uploadBlob(sha);
         }
-    json payload{{"modelId", modelId}, {"text", mk.value("text", "")}, {"images", imgs}};
+    json payload{{"modelId", modelId}, {"text", str(mk, "text")}, {"images", imgs}};
     if (mk.contains("v") && mk["v"].is_number_integer()) payload["v"] = mk["v"];
     if (payload["text"].get<std::string>().empty() && imgs.empty()) return fail("Add a photo or a few words about your print");
     author("make.post", payload);
@@ -815,6 +1098,7 @@ std::string SwampCoreImpl::postMake(std::string modelId, std::string makeJson) {
 
 std::string SwampCoreImpl::like(std::string modelId, std::string on) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
     modelId = unquote(modelId); on = unquote(on);
     if (!m_cat.models.count(modelId)) return fail("No such model");
     bool b = !(on == "false" || on == "0" || on == "no" || on == "off");
@@ -824,10 +1108,11 @@ std::string SwampCoreImpl::like(std::string modelId, std::string on) {
 
 std::string SwampCoreImpl::setProfile(std::string profileJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
     json p = parseArg(profileJson);
     if (!p.is_object()) return fail("The profile is not valid JSON");
-    std::string name = p.value("name", "");
+    std::string name = str(p, "name");
     if (name.empty() || name.size() > 60) return fail("Pick a display name (1-60 characters)");
-    author("profile.put", json{{"name", name}, {"bio", p.value("bio", "")}});
+    author("profile.put", json{{"name", name}, {"bio", str(p, "bio")}});
     return ok();
 }

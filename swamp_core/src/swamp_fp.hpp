@@ -73,6 +73,24 @@ inline double dist3(const double* a, const double* b) {
     return std::sqrt(x * x + y * y + z * z);
 }
 
+/** Drop triangles with non-finite or absurd coordinates (a crafted STL must not crash us). */
+inline std::vector<double> sanitize(const std::vector<double>& in) {
+    std::vector<double> out;
+    out.reserve(in.size());
+    for (size_t i = 0; i + 9 <= in.size(); i += 9) {
+        bool ok = true;
+        for (int k = 0; k < 9; k++) if (!std::isfinite(in[i + k]) || std::fabs(in[i + k]) > 1e7) { ok = false; break; }
+        if (ok) out.insert(out.end(), in.begin() + i, in.begin() + i + 9);
+    }
+    return out;
+}
+inline int clampBin(double x, int bins) {
+    if (!std::isfinite(x)) return -1;
+    if (x < 0) return 0;
+    if (x >= bins) return bins - 1;
+    return (int)x;
+}
+
 inline Samples samplePoints(const std::vector<double>& tris, int count = SAMPLES, uint32_t seed = 0x5a3b) {
     const size_t n = tris.size() / 9;
     if (!n) throw std::runtime_error("mesh has no triangles");
@@ -157,13 +175,14 @@ inline void f1(const Samples& S, Fingerprint& F) {
     }
     mean /= D2_PAIRS;
     for (int i = 0; i < D2_PAIRS; i++) {
-        int bin = std::min(D2_BINS - 1, (int)std::floor((d[i] / (mean ? mean : 1) / D2_MAX) * D2_BINS));
-        F.d2[bin] += 1.0 / D2_PAIRS;
+        int bin = clampBin(std::floor((d[i] / (mean ? mean : 1) / D2_MAX) * D2_BINS), D2_BINS);
+        if (bin >= 0) F.d2[bin] += 1.0 / D2_PAIRS;
     }
     for (int i = 0; i < A3_TRIPLES; i++) {
         int a = R.u32() % n, b = R.u32() % n, c = R.u32() % n;
         double ang = angleAt(p, b, a, c);
-        F.a3[std::min(A3_BINS - 1, (int)std::floor((ang / M_PI) * A3_BINS))] += 1.0 / A3_TRIPLES;
+        int bin = clampBin(std::floor((ang / M_PI) * A3_BINS), A3_BINS);
+        if (bin >= 0) F.a3[bin] += 1.0 / A3_TRIPLES;
     }
 }
 
@@ -206,8 +225,9 @@ inline void f3(const Samples& S, Fingerprint& F) {
             double a2 = std::fabs(q[j * 3] * dx + q[j * 3 + 1] * dy + q[j * 3 + 2] * dz);
             double a3 = std::fabs(q[i * 3] * q[j * 3] + q[i * 3 + 1] * q[j * 3 + 1] + q[i * 3 + 2] * q[j * 3 + 2]);
             double lr = std::log2(dij / r / std::sqrt(RANKS[ri] / 4.0));
-            int rb = std::max(0, std::min(RATIO_BINS - 1, (int)std::floor((lr + 1) * RATIO_BINS / 2)));
-            auto qa = [](double x) { return std::min(ANG_BINS - 1, (int)std::floor(x * ANG_BINS)); };
+            int rb = clampBin(std::floor((lr + 1) * RATIO_BINS / 2), RATIO_BINS);
+            auto qa = [](double x) { return clampBin(std::floor(x * ANG_BINS), ANG_BINS); };
+            if (rb < 0 || qa(a1) < 0 || qa(a2) < 0 || qa(a3) < 0) continue;
             int tok = (((ri * RATIO_BINS + rb) * ANG_BINS + qa(a1)) * ANG_BINS + qa(a2)) * ANG_BINS + qa(a3);
             hist[tok] += 1;
         }
@@ -218,7 +238,8 @@ inline void f3(const Samples& S, Fingerprint& F) {
     for (int t = 0; t < F3_SIZE; t++) F.f3[t] = (int)std::floor((tot ? hist[t] / tot : 0) * 65535 + 0.5);
 }
 
-inline Fingerprint fingerprint(const std::vector<double>& tris) {
+inline Fingerprint fingerprint(const std::vector<double>& rawTris) {
+    std::vector<double> tris = sanitize(rawTris);
     Samples S = samplePoints(tris);
     Fingerprint F;
     f1(S, F);

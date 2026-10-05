@@ -54,7 +54,14 @@ inline std::string png(const std::vector<uint8_t>& rgba, int w, int h) {
 }
 
 /** Render a triangle soup (9 doubles per triangle) to an RGBA PNG of size x size. */
-inline std::string render(const std::vector<double>& tris, int size = 256) {
+inline std::string render(const std::vector<double>& rawTris, int size = 256) {
+    // drop non-finite / absurd coordinates (a crafted STL must not crash the renderer)
+    std::vector<double> tris;
+    for (size_t i = 0; i + 9 <= rawTris.size(); i += 9) {
+        bool ok = true;
+        for (int k = 0; k < 9; k++) if (!std::isfinite(rawTris[i + k]) || std::fabs(rawTris[i + k]) > 1e7) { ok = false; break; }
+        if (ok) tris.insert(tris.end(), rawTris.begin() + i, rawTris.begin() + i + 9);
+    }
     const size_t n = tris.size() / 9;
     // view: rotate 35 deg about Z, then tilt 30 deg about X (three-quarter view, Z up)
     const double az = 35 * M_PI / 180, el = 60 * M_PI / 180;
@@ -88,8 +95,9 @@ inline std::string render(const std::vector<double>& tris, int size = 256) {
         uint8_t r = (uint8_t)std::min(255.0, 70 + 170 * shade), g = (uint8_t)std::min(255.0, 95 + 140 * shade), bl = (uint8_t)std::min(255.0, 60 + 110 * shade);
         double P[3][3];
         for (int k = 0; k < 3; k++) { double* s = a + k * 3; P[k][0] = ox + (s[0] - mn[0]) * scale; P[k][1] = size - (oy + (s[1] - mn[1]) * scale); P[k][2] = s[2]; }
-        int x0 = std::max(0, (int)std::floor(std::min({P[0][0], P[1][0], P[2][0]}))), x1 = std::min(size - 1, (int)std::ceil(std::max({P[0][0], P[1][0], P[2][0]})));
-        int y0 = std::max(0, (int)std::floor(std::min({P[0][1], P[1][1], P[2][1]}))), y1 = std::min(size - 1, (int)std::ceil(std::max({P[0][1], P[1][1], P[2][1]})));
+        auto cl = [size](double x) { return x < 0 ? 0 : x > size - 1 ? size - 1 : (int)x; };
+        int x0 = cl(std::floor(std::min({P[0][0], P[1][0], P[2][0]}))), x1 = cl(std::ceil(std::max({P[0][0], P[1][0], P[2][0]})));
+        int y0 = cl(std::floor(std::min({P[0][1], P[1][1], P[2][1]}))), y1 = cl(std::ceil(std::max({P[0][1], P[1][1], P[2][1]})));
         double den = (P[1][1] - P[2][1]) * (P[0][0] - P[2][0]) + (P[2][0] - P[1][0]) * (P[0][1] - P[2][1]);
         if (std::fabs(den) < 1e-12) continue;
         for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) {

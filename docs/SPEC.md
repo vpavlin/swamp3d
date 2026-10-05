@@ -10,18 +10,25 @@ paid models, Android.
 - Every installation has a **device identity**: a secp256k1 key in the core's data dir, address
   `0x` + last 20 bytes of `sha256(compressed pubkey)` (loam-sync signing, domain `swamp`).
   Later: a loam identity / Keycard per person (loam-sync delegation certs).
-- **Creator** = the author of a model's `model.create`. Only the creator may add versions, CIDs or
-  retract the model.
+- **Creator** = the author of a model's `model.create`. Only the creator may add versions or
+  retract the model. Anyone may announce a CID for a file; the creator's come first (§ 4, ADR 0010).
 - **Hub** = the same core running headless with `SWAMP_HUB=1`: it caches every file it sees.
 
 ## 2. Transport
 
 - One public catalogue topic: `/swamp/1/catalog/proto`, via `loam_core` (`join`, `sendSealed`,
   `received`). Frames are JSON, base64-encoded once; receive peels up to three base64 layers.
-- Frames: `{"t":"ev","e":<event>}` (one event) and loam-sync catch-up frames
-  (`fp` / `ids` / `need`, `logos_sync::catchup`), answered by any peer.
+- Frames: `{"t":"ev","e":<event>}` (one event), `{"t":"evs","es":[<event>…]}` (a batch, ≤ 48 KB,
+  used when serving catch-up) and loam-sync catch-up frames (`fp` / `ids` / `need`,
+  `logos_sync::catchup`), answered by any peer. Every frame from the wire is shape-checked first;
+  anything malformed is dropped and counted (`rxBad`).
 - Catch-up: once on connect (3/10/25 s ladder), then every 2 minutes (RLN budget:
   logos-rln-budget). Snapshots to Storage are M2.
+- Answering is budgeted: a peer's opening `fp` is answered at most once per 20 s; served events ≤
+  200 per minute in total; catch-up frames older than 2 minutes (the fleet store replays them on
+  every connect) are ignored. Events are ingested whatever their age.
+- An event is verified once, when it enters the log; the fold then trusts the log. The device clock
+  advances on every admitted event, unless it is more than 5 minutes in the future.
 - **Not sealed.** The catalogue is public by intent; integrity comes from signatures (ADR 0010).
 
 ## 3. Events
@@ -69,13 +76,27 @@ unsigned, badly signed, or of an unknown type. Payload size limit: 16 KiB per ev
 - Two ids: `sha256` (known at publish, in the event) and `cid` (announced by a `blob.cids` event
   when the upload completes - by the creator, or by any mirror). Uploads are staged under the file name `<sha256>` so anyone re-uploading the
   same bytes gets the same CID.
-- **The host owns Storage** (Basecamp 0.3 / logosctl): the core calls `init` once; if refused it
-  adopts the host's node and never stops or reconfigures it.
+- **The host owns Storage** (Basecamp 0.3 / logosctl): the core never calls `init` (a successful
+  `init` would replace the host's config for every module) unless `SWAMP_STORAGE_CFG` is set, for a
+  host that doesn't run Storage itself. It adopts the host's node and never stops or reconfigures it.
+- Upload: `uploadUrl(path, 65536, true)`; done by `storageUploadDone` **or** by `manifests()` listing
+  the staged file name. Every blob this node is responsible for (its versions' files, images and
+  fingerprint, its makes' photos) is retried every 60 s until it has a CID. CIDs go out batched,
+  ≤ 64 per `blob.cids` event.
 - Download: `downloadToUrlAsyncResult(cid, path, false, 65536, false, true, cb, 60000)`; completion
-  by `storageDownloadDone` **or** by polling (file size reaches the manifest's `datasetSize`);
-  the downloaded bytes must hash to `sha256` or the file is rejected.
-- A **hub** (`SWAMP_HUB=1`) fetches (`fetchAsyncResult`) every CID it sees, retrying for 30
-  minutes, and keeps it. Its Storage config (the host's `config.json`) needs a public `extip`,
+  by `storageDownloadDone` **or** by polling (the part file reaches the size the signed version
+  declares). A part file that grows past that size is cut off. The bytes are hashed while streaming
+  and must equal `sha256`, or the file is rejected and the next candidate CID tried. After a full
+  round of candidates: back-off (30 s, doubling, ≤ 30 min); a download job fails after 3 rounds,
+  with the reason. In flight at once: 6 overall, 2 for previews, 3 for a hub's sweep.
+- A **hub** (`SWAMP_HUB=1`) fetches every file, image and fingerprint it sees, with the same retry
+  rules, and keeps them.
+- **Finding a holder needs a common DHT.** Two fresh nodes don't find each other's content by
+  themselves: the fetching node needs a `bootstrap-node` (the holder's or a hub's `spr`) in its
+  host Storage `config.json`, and the holder needs an announced address (`nat: extip:<addr>`).
+  Measured on logosctl 0.3.1: without the bootstrap, "failed to get manifest"; with it, the file
+  arrived byte-identical. `config.json` keys that libstorage doesn't know (e.g. `disc-port`) make
+  the whole file fail to load. Its Storage config (the host's `config.json`) needs a public `extip`,
   `autonat-server`, `relay-server` and a long `block-ttl` (logos-storage).
 
 ## 5. Fold → catalogue state

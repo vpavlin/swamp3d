@@ -7,6 +7,7 @@
 #include <QElapsedTimer>
 #include <iostream>
 #include <filesystem>
+#include <fstream>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -114,25 +115,88 @@ int main(int argc, char** argv) {
         for (auto* n : FakeLoamBus::get().nodes) if (n->onRecv && n != &mallory->bus)
             n->onRecv(swamp::CATALOG_TOPIC, "x", FakeLoamBus::b64(json{{"t", "ev"}, {"e", logos_sync::eventToJson(ev)}}.dump()), 0);
         pump(200);
-        // the bogus CID sorts first (older HLC); carol (no local copy) must still end up with the right bytes
         Peer* carol = spawn("carol");
         pump(1300);
         carol->call(carol->core.resync());
         CHECK(waitFor([&] { return json::parse(carol->core.listModels("{}"))["total"] == 2; }, 8000), "late joiner catches up the whole catalogue");
+        // the creator's CID is tried first; with every honest holder offline carol falls through
+        // to mallory's CID, gets the wrong bytes, and must throw them away
+        alice->store.online = false; hub->store.online = false;
         carol->call(carol->core.download(mid, "2"));
+        CHECK(waitFor([&] { return carol->snap()["counters"]["verifyFailed"].get<int>() >= 1; }, 5000), "the bogus bytes were detected and thrown away");
+        json f2 = json::parse(carol->core.getModel(mid))["model"]["versions"][1]["files"][0];
+        CHECK(f2["local"].is_null() && f2.value("fetchError", "") != "", "nothing saved; the file shows why it isn't there yet");
+        CHECK(json::parse(carol->core.getModel(mid))["model"]["versions"][1]["download"]["status"] == "fetching", "the download keeps retrying (back-off), not failed");
+        alice->store.online = true; hub->store.online = true;
+        carol->call(carol->core.download(mid, "2"));   // asking again skips the back-off
         CHECK(waitFor([&] { json m = json::parse(carol->core.getModel(mid))["model"]; return m["versions"][1].value("download", json::object()).value("status", "") == "done"; }, 10000),
-              "carol gets v2 despite a bogus first CID");
-        CHECK(carol->snap()["counters"]["verifyFailed"].get<int>() >= 1, "the bogus bytes were detected and thrown away");
+              "carol gets v2 once an honest holder is back");
     }
 
+    // malformed and hostile frames: dropped and counted, the node keeps working (review C2)
+    {
+        long badBefore = bob->snap()["counters"]["rxBad"].get<long>();
+        auto inject = [&](const json& f) { bob->bus.onRecv(swamp::CATALOG_TOPIC, "x", FakeLoamBus::b64(f.dump()), 0); };
+        inject(json{{"t", "fp"}, {"from", "zz"}, {"fps", {"a", "b"}}});                  // bounds missing
+        inject(json{{"t", "fp"}, {"from", "zz"}, {"fps", {1, 2}}, {"bounds", {3}}});     // wrong types
+        inject(json{{"t", "ids"}, {"from", "zz"}, {"ids", "notalist"}});
+        inject(json{{"t", "need"}, {"from", "zz"}, {"ids", {{{"x", 1}}}}});
+        inject(json{{"t", "ev"}, {"e", "garbage"}});
+        inject(json{{"t", "evs"}, {"es", {1, "two", json::object()}}});
+        bob->bus.onRecv(swamp::CATALOG_TOPIC, "x", "!!!not base64 or json", 0);
+        pump(300);
+        CHECK(bob->snap()["counters"]["rxBad"].get<long>() - badBefore >= 7, "malformed frames are counted, not crashed on");
+        CHECK(json::parse(bob->core.listModels("{}"))["total"] == 2, "catalogue intact after hostile frames");
+    }
+
+    // CIDs are announced in batches, and a known CID is never re-announced (review H4)
+    {
+        std::string aliceAddr0 = alice->snap()["me"]["address"];
+        auto countCids = [&] {
+            std::ifstream f(root + "/alice/data/catalog.json");
+            json a = json::parse(std::string(std::istreambuf_iterator<char>(f), {}), nullptr, false);
+            int n = 0;
+            if (a.is_array()) for (const auto& e : a) if (e.value("type", "") == "blob.cids" && e.value("dev", "") == aliceAddr0) n++;
+            return n;
+        };
+        pump(2200);   // let the save throttle flush
+        int before = countCids();
+        pump(1500);
+        CHECK(countCids() == before, "no blob.cids re-announced while the catalogue already has them");
+        CHECK(before <= 4, "alice's CIDs went out in a few batched events (" + std::to_string(before) + ")");
+    }
+
+    // a draft that fails validation leaves no orphan model behind (review M7)
+    {
+        size_t n0 = alice->snap()["catalog"]["events"];
+        json bad2 = json::parse(alice->core.publish(json{{"title", "x"}, {"licence", "CC0-1.0"}, {"tags", "not-a-list"}, {"files", {{{"path", stl1}}}}}.dump()));
+        CHECK(!bad2.value("ok", true) && alice->snap()["catalog"]["events"] == n0, "invalid draft: refused, nothing authored");
+    }
+    CHECK((fs::status(root + "/alice/data/identity.json").permissions() & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none,
+          "identity key file is owner-only (review M8)");
+
     // restart: alice's identity, catalogue and her CIDs survive
+    pump(2200);   // received events are saved on a short throttle
     std::string aliceAddr = alice->snap()["me"]["address"];
     setenv("SWAMP_CORE_DATA", (root + "/alice/data").c_str(), 1);
     SwampCoreImpl again; FakeLoamNode nb; FakeStoreNode ns; nb.name = ns.name = "alice2";
     again.modules().loam_core.node = &nb; again.modules().storage_module.node = &ns;
     again.fakeStart();
+    pump(100);   // the stored log loads just after onContextReady
     json s2 = json::parse(again.snapshot());
     CHECK(s2["me"]["address"] == aliceAddr && s2["catalog"]["models"] == 2, "restart keeps identity and catalogue");
+
+        // a node whose 'Connected' event is lost still comes up, by polling loam_core (review M5)
+    {
+        setenv("SWAMP_CORE_DATA", (root + "/dave/data").c_str(), 1);
+        Peer* dave = new Peer(); dave->name = dave->bus.name = dave->store.name = "dave";
+        dave->bus.dropStatusEvent = true;
+        dave->core.modules().loam_core.node = &dave->bus; dave->core.modules().storage_module.node = &dave->store;
+        FakeLoamBus::get().nodes.push_back(&dave->bus); FakeStoreNet::get().nodes.push_back(&dave->store);
+        dave->core.fakeStart();
+        CHECK(waitFor([&] { return dave->snap()["status"] == "Connected"; }, 4000), "lost Connected event: status poll brings the node up");
+        CHECK(waitFor([&] { return json::parse(dave->core.listModels("{}"))["total"].get<int>() >= 2; }, 8000), "...and it catches up");
+    }
 
     std::cout << passes << " passed, " << fails << " failed\n";
     return fails ? 1 : 0;

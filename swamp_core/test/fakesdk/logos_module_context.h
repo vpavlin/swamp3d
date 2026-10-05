@@ -32,6 +32,7 @@ struct FakeLoamCore {
     void startAsync(const std::string& cfg, Cb cb);
     void joinAsync(const std::string& topic, Cb cb);
     void sendSealedAsync(const std::string& topic, const std::string& b64, Cb cb);
+    void statusAsync(Cb cb);
 };
 
 struct FakeStoreNode;
@@ -44,6 +45,11 @@ struct FakeStorage {
     void start();
     StdLogosResult uploadUrl(const std::string& path, int chunk, bool advertise);
     StdLogosResult manifests();
+    StdLogosResult downloadCancel(const std::string& sessionId);
+    using ResCb = std::function<void(logos::AsyncResult<StdLogosResult>)>;
+    void uploadUrlAsyncResult(const std::string& path, int chunk, bool advertise, ResCb cb, int timeoutMs);
+    void manifestsAsyncResult(ResCb cb, int timeoutMs);
+    void downloadCancelAsyncResult(const std::string& sessionId, ResCb cb, int timeoutMs);
     void downloadToUrlAsyncResult(const std::string& cid, const std::string& path, bool local, int chunk, bool isPrivate, bool advertise,
                                   std::function<void(logos::AsyncResult<StdLogosResult>)> cb, int timeoutMs);
 };

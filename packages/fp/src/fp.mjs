@@ -137,14 +137,15 @@ function f1(S) {
   mean /= P.d2Pairs || 1;
   const d2 = new Float64Array(P.d2Bins);
   for (let i = 0; i < P.d2Pairs; i++) {
-    const bin = Math.min(P.d2Bins - 1, Math.floor((d[i] / (mean || 1) / P.d2Max) * P.d2Bins));
-    d2[bin] += 1 / P.d2Pairs;
+    const bin = clampBin(Math.floor((d[i] / (mean || 1) / P.d2Max) * P.d2Bins), P.d2Bins);
+    if (bin >= 0) d2[bin] += 1 / P.d2Pairs;
   }
   const a3 = new Float64Array(P.a3Bins);
   for (let i = 0; i < P.a3Triples; i++) {
     const a = R.u32() % n, b = R.u32() % n, c = R.u32() % n;
     const ang = angleAt(p, b, a, c);
-    a3[Math.min(P.a3Bins - 1, Math.floor((ang / Math.PI) * P.a3Bins))] += 1 / P.a3Triples;
+    const bin = clampBin(Math.floor((ang / Math.PI) * P.a3Bins), P.a3Bins);
+    if (bin >= 0) a3[bin] += 1 / P.a3Triples;
   }
   return { d2: Array.from(d2), a3: Array.from(a3) };
 }
@@ -273,8 +274,9 @@ function f3(S) {
       const a3 = Math.abs(q[i * 3] * q[j * 3] + q[i * 3 + 1] * q[j * 3 + 1] + q[i * 3 + 2] * q[j * 3 + 2]);
       // ratio relative to what that rank "usually" is on a flat uniform surface (~sqrt(k/4))
       const lr = Math.log2(dij / r / Math.sqrt(RANKS[ri] / 4));
-      const rb = Math.max(0, Math.min(Rb - 1, Math.floor((lr + 1) * Rb / 2)));
-      const qa = (x) => Math.min(A - 1, Math.floor(x * A));
+      const rb = clampBin(Math.floor((lr + 1) * Rb / 2), Rb);
+      const qa = (x) => clampBin(Math.floor(x * A), A);
+      if (rb < 0 || qa(a1) < 0 || qa(a2) < 0 || qa(a3) < 0) continue;
       const tok = (((ri * Rb + rb) * A + qa(a1)) * A + qa(a2)) * A + qa(a3);
       hist[tok] += 1;
     }
@@ -286,8 +288,26 @@ function f3(S) {
 }
 
 /** Fingerprint a mesh given as triangle soup (Float64Array, 9 per triangle). */
+// Drop triangles with a non-finite or absurd (|x| > 1e7) coordinate, so a hostile STL can't
+// poison the sampling or the binning. Same rule as swamp_core/src/swamp_fp.hpp sanitize().
+export function sanitize(tris) {
+  const out = [];
+  for (let i = 0; i + 9 <= tris.length; i += 9) {
+    let ok = true;
+    for (let k = 0; k < 9; k++) { const x = tris[i + k]; if (!Number.isFinite(x) || Math.abs(x) > 1e7) { ok = false; break; } }
+    if (ok) for (let k = 0; k < 9; k++) out.push(tris[i + k]);
+  }
+  return Float64Array.from(out);
+}
+// Histogram bin, clamped; -1 (skip) for NaN/Infinity. Same as clampBin() in the C++ port.
+function clampBin(x, bins) {
+  if (!Number.isFinite(x)) return -1;
+  if (x < 0) return 0;
+  return x >= bins ? bins - 1 : Math.floor(x);
+}
+
 export function fingerprint(tris) {
-  const S = samplePoints(tris);
+  const S = samplePoints(sanitize(tris));
   const { d2, a3 } = f1(S);
   const set = tokens(S);
   const sig = minhash(set);

@@ -66,3 +66,17 @@ inline void FakeStorage::downloadToUrlAsyncResult(const std::string& cid, const 
         if (n->onDown && !n->dropEvents) n->onDown(LogosMap{{"sessionId", sess}, {"success", true}}.dump());
     });
 }
+inline StdLogosResult FakeStorage::downloadCancel(const std::string&) { return StdLogosResult{true, "", nullptr}; }
+// async variants: the same calls, answered on the event loop like the real IPC
+inline void FakeStorage::uploadUrlAsyncResult(const std::string& path, int chunk, bool advertise, ResCb cb, int) {
+    logos::AsyncResult<StdLogosResult> r; r.value = uploadUrl(path, chunk, advertise);
+    FakeStoreNet::later(2, [cb, r] { cb(r); });
+}
+inline void FakeStorage::manifestsAsyncResult(ResCb cb, int) {
+    logos::AsyncResult<StdLogosResult> r; r.value = manifests();
+    FakeStoreNet::later(2, [cb, r] { cb(r); });
+}
+inline void FakeStorage::downloadCancelAsyncResult(const std::string& s, ResCb cb, int) {
+    logos::AsyncResult<StdLogosResult> r; r.value = downloadCancel(s);
+    FakeStoreNet::later(2, [cb, r] { cb(r); });
+}

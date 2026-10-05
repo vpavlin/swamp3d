@@ -9,7 +9,7 @@ Versions are the unit people download, remix and (later) anchor. A history anyon
 
 ## Decision
 
-model.create fixes the creator (first by HLC wins for a modelId; modelId is derived from the creator's address and a nonce, so it can't be squatted). Only the creator's later events count for versions, CIDs and retraction. Version v must be exactly latest+1 and is first-writer-wins, never edited. Retract is a tombstone that hides a model by default but keeps its versions.
+model.create fixes the creator (first by HLC wins for a modelId; modelId is derived from the creator's address and a nonce, so it can't be squatted). Only the creator's later events count for versions and retraction. CIDs (where to fetch a file) may be announced by anyone, since mirrors and hubs re-host files; the fold lists the creator's CIDs first (≤ 4), then at most one per other announcer (≤ 8 in total), so nobody can push the creator's CID out (review 2026-10-05, H1). Version v must be exactly latest+1 and is first-writer-wins, never edited. Retract is a tombstone that hides a model by default but keeps its versions.
 
 ## Rejected
 
