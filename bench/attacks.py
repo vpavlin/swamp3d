@@ -80,11 +80,12 @@ def attacks(mesh, seed):
 
     # cut: keep the part below 60% of the height, capped
     try:
-        c = mesh.slice_plane(plane_origin=[0, 0, lo[2] + ext[2] * 0.6], plane_normal=[0, 0, -1], cap=True)
-        if c is not None and len(c.faces) > 0:
+        z = lo[2] + ext[2] * 0.6
+        c = from_manifold(to_manifold(mesh).trim_by_plane((0.0, 0.0, -1.0), -z))   # keep z <= cut
+        if len(c.faces) > 0:
             out["cut60"] = c
-    except Exception:
-        pass
+    except Exception as e:
+        print("cut failed", e)
 
     # combined: decimate + base + scale + rotate (a lazy but determined thief)
     m = out["decimate50"].copy()
@@ -104,7 +105,10 @@ def main():
             mesh = trimesh.load(src, force="mesh")
         except Exception as e:
             print("skip", item["id"], e); continue
+        only = os.environ.get("ATTACKS")
         for name, m in attacks(mesh, int(item["id"])).items():
+            if only and name not in only.split(","):
+                continue
             m.export(os.path.join(OUT, f"{item['id']}__{name}.stl"), file_type="stl")
         done += 1
         print(f"{done}/{len(sel)} {item['id']}", flush=True)

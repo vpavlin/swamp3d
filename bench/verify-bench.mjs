@@ -29,7 +29,7 @@ for (const j of mine) {
   const t0 = Date.now();
   // A = the (possible) original, B = the suspect; also the reverse, for cuts
   const ab = coverage(tris(j.a), tris(j.b)), ba = coverage(tris(j.b), tris(j.a));
-  out.push({ ...j, ab: ab.coverage, ba: ba.coverage, scale: ab.scale, mirrored: ab.mirrored, ms: Date.now() - t0 });
+  out.push({ ...j, ab: ab.coverage, ba: ba.coverage, abt: ab.tight, bat: ba.tight, abd: ab.distinctive, bad: ba.distinctive, detA: ab.detail, detB: ba.detail, scale: ab.scale, mirrored: ab.mirrored, ms: Date.now() - t0 });
   if (load.size > 40) load.clear();
 }
 writeFileSync(join(HERE, `results/verify-${shard}.json`), JSON.stringify(out));

@@ -120,7 +120,7 @@ export function samplePoints(tris, count = PARAMS.samples, seed = 0x5a3b) {
     const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
     nrm[s * 3] = nx / nl; nrm[s * 3 + 1] = ny / nl; nrm[s * 3 + 2] = nz / nl;
   }
-  return { pts, nrm, count };
+  return { pts, nrm, count, area: total };
 }
 
 // ── F1: D2 + A3 histograms ───────────────────────────────────────────────────────

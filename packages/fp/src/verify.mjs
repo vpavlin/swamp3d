@@ -35,26 +35,64 @@ function knn(pts, n, K) {
   return { nb, nd, K };
 }
 
+// FPFH-style local descriptor (Rusu 2009), with unsigned normals so mirrored copies and
+// inconsistent winding don't matter. 3 features x 11 bins = 33 dims per point.
+const NB = 16, BINS = 11;
 function descriptors(S) {
-  const K = Math.max(...RANKS), n = S.count, p = S.pts, q = S.nrm;
-  const { nb, nd } = knn(p, n, K);
-  const D = new Float64Array(n * RANKS.length * 4);
+  const n = S.count, p = S.pts, q = S.nrm;
+  const { nb, nd } = knn(p, n, NB);
+  const spfh = new Float64Array(n * 3 * BINS);
+  const bin = (x) => Math.min(BINS - 1, Math.max(0, Math.floor(x * BINS)));
+  for (let i = 0; i < n; i++) {
+    const ux = q[i * 3], uy = q[i * 3 + 1], uz = q[i * 3 + 2];
+    for (let k = 0; k < NB; k++) {
+      const j = nb[i * NB + k], d = nd[i * NB + k];
+      if (j === i || d === 0) continue;
+      const dx = (p[j * 3] - p[i * 3]) / d, dy = (p[j * 3 + 1] - p[i * 3 + 1]) / d, dz = (p[j * 3 + 2] - p[i * 3 + 2]) / d;
+      // Darboux frame: u = n_i, v = u x d, w = u x v
+      let vx = uy * dz - uz * dy, vy = uz * dx - ux * dz, vz = ux * dy - uy * dx;
+      const vl = Math.hypot(vx, vy, vz) || 1; vx /= vl; vy /= vl; vz /= vl;
+      const wx = uy * vz - uz * vy, wy = uz * vx - ux * vz, wz = ux * vy - uy * vx;
+      const nx = q[j * 3], ny = q[j * 3 + 1], nz = q[j * 3 + 2];
+      const alpha = Math.abs(vx * nx + vy * ny + vz * nz);
+      const phi = Math.abs(ux * dx + uy * dy + uz * dz);
+      const theta = Math.atan2(Math.abs(wx * nx + wy * ny + wz * nz), Math.abs(ux * nx + uy * ny + uz * nz)) / (Math.PI / 2);
+      const o = i * 3 * BINS;
+      spfh[o + bin(alpha)] += 1; spfh[o + BINS + bin(phi)] += 1; spfh[o + 2 * BINS + bin(theta)] += 1;
+    }
+  }
+  // distinctiveness: 0 on flat surface, up to 1 at edges / curvature / detail
+  const weight = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let agree = 0;
+    for (let k = 0; k < NB; k++) { const j = nb[i * NB + k]; agree += Math.abs(q[i * 3] * q[j * 3] + q[i * 3 + 1] * q[j * 3 + 1] + q[i * 3 + 2] * q[j * 3 + 2]); }
+    weight[i] = Math.min(1, Math.max(0, (1 - agree / NB) * 4));
+  }
+  const D = new Float64Array(n * 3 * BINS);
   const spacing = new Float64Array(n);
   for (let i = 0; i < n; i++) {
-    const r = nd[i * K + 3] || 1e-12;
-    spacing[i] = r;
-    RANKS.forEach((rank, ri) => {
-      const j = nb[i * K + rank - 1], dij = nd[i * K + rank - 1] || 1e-12;
-      const dx = (p[j * 3] - p[i * 3]) / dij, dy = (p[j * 3 + 1] - p[i * 3 + 1]) / dij, dz = (p[j * 3 + 2] - p[i * 3 + 2]) / dij;
-      const o = (i * RANKS.length + ri) * 4;
-      D[o] = Math.log2(dij / r) * 0.5;
-      D[o + 1] = Math.abs(q[i * 3] * dx + q[i * 3 + 1] * dy + q[i * 3 + 2] * dz);
-      D[o + 2] = Math.abs(q[j * 3] * dx + q[j * 3 + 1] * dy + q[j * 3 + 2] * dz);
-      D[o + 3] = Math.abs(q[i * 3] * q[j * 3] + q[i * 3 + 1] * q[j * 3 + 1] + q[i * 3 + 2] * q[j * 3 + 2]);
-    });
+    spacing[i] = nd[i * NB];
+    const o = i * 3 * BINS;
+    for (let t = 0; t < 3 * BINS; t++) D[o + t] = spfh[o + t];
+    for (let k = 0; k < NB; k++) {
+      const j = nb[i * NB + k], w = 1 / NB;
+      for (let t = 0; t < 3 * BINS; t++) D[o + t] += w * spfh[j * 3 * BINS + t];
+    }
+    let s2 = 0; for (let t = 0; t < 3 * BINS; t++) s2 += D[o + t] * D[o + t];
+    s2 = Math.sqrt(s2) || 1; for (let t = 0; t < 3 * BINS; t++) D[o + t] /= s2;
   }
   const sorted = Array.from(spacing).sort((a, b) => a - b);
-  return { D, dim: RANKS.length * 4, spacing: sorted[sorted.length >> 1] };
+  return { D, dim: 3 * BINS, spacing: sorted[sorted.length >> 1], weight };
+}
+
+function nearestDesc(Dx, i, Dy, ny, dim) {
+  let best = -1, bd = Infinity;
+  for (let j = 0; j < ny; j++) {
+    let s = 0;
+    for (let k = 0; k < dim; k++) { const x = Dx[i * dim + k] - Dy[j * dim + k]; s += x * x; if (s >= bd) break; }
+    if (s < bd) { bd = s; best = j; }
+  }
+  return [best, bd];
 }
 
 // Umeyama similarity transform A -> B from point lists (reflection allowed).
@@ -137,27 +175,34 @@ function grid(pts, n, cell) {
  * Coverage of A by B: fraction of A's surface samples that land on B under the best similarity
  * transform. Returns { coverage, scale, mirrored, inliers }.
  */
-export function coverage(trisA, trisB, { samples = 1536, iters = 1500, seed = 0x7e57 } = {}) {
+export function coverage(trisA, trisB, { samples = 1024, iters = 4000, seed = 0x7e57 } = {}) {
   const A = samplePoints(trisA, samples, 0x5a3b), B = samplePoints(trisB, samples * 2, 0x5a3c);
   const da = descriptors(A), db = descriptors(B);
   const dim = da.dim;
-  // A -> best B match by descriptor (keep the 40% most confident)
+  // mutual nearest neighbours in descriptor space
   const matches = [];
+  const bBest = new Int32Array(B.count).fill(-2);
   for (let i = 0; i < A.count; i++) {
-    let best = -1, bd = Infinity;
-    for (let j = 0; j < B.count; j++) {
-      let s = 0;
-      for (let k = 0; k < dim; k++) { const x = da.D[i * dim + k] - db.D[j * dim + k]; s += x * x; if (s >= bd) break; }
-      if (s < bd) { bd = s; best = j; }
-    }
-    matches.push([i, best, bd]);
+    const [j, d] = nearestDesc(da.D, i, db.D, B.count, dim);
+    if (j < 0) continue;
+    if (bBest[j] === -2) bBest[j] = nearestDesc(db.D, j, da.D, A.count, dim)[0];
+    if (bBest[j] === i) matches.push([i, j, d]);
   }
   matches.sort((x, y) => x[2] - y[2]);
-  const M = matches.slice(0, Math.max(30, Math.floor(matches.length * 0.4)));
+  const M = matches.length >= 3 ? matches : [];
+  if (M.length < 3) return { coverage: 0, tight: 0, distinctive: 0, detail: 0, scale: 0, mirrored: false };
   const P = (S, i) => [S.pts[i * 3], S.pts[i * 3 + 1], S.pts[i * 3 + 2]];
-  const eps = 2.5 * db.spacing;
+  // A point on B's surface lies within eps of one of B's N random samples with probability
+  // 1 - exp(-pi * N * eps^2 / area); eps = 1.2 * sqrt(area / N) gives ~99%.
+  const eps = 1.2 * Math.sqrt(B.area / B.count);
   const g = grid(B.pts, B.count, eps);
   const R = rng(seed);
+  // If A is contained in B (rotated, mirrored, uniformly scaled by s), then s^2 * area(A) <= area(B).
+  // Reject transforms outside [0.3, 1.15] x that bound: tiny scales collapse A onto one spot of B
+  // and would "cover" anything.
+  const s0 = Math.sqrt(B.area / A.area);
+  // the copied part must be at least ~25% of the suspect's surface: s >= 0.5 * s0
+  const plausible = (T) => T.s > 0 && isFinite(T.s) && T.s <= 1.15 * s0 && T.s >= 0.5 * s0;
   const countIn = (T, step = 1) => {
     let c = 0, tot = 0;
     for (let i = 0; i < A.count; i += step) { tot++; if (g.near(apply(T, P(A, i)), eps)) c++; }
@@ -168,16 +213,21 @@ export function coverage(trisA, trisB, { samples = 1536, iters = 1500, seed = 0x
     const m = [M[R.u32() % M.length], M[R.u32() % M.length], M[R.u32() % M.length]];
     if (m[0][0] === m[1][0] || m[1][0] === m[2][0] || m[0][0] === m[2][0]) continue;
     const a = m.map((x) => P(A, x[0])), b = m.map((x) => P(B, x[1]));
+    // the three edge lengths must agree up to one common scale (cheap rejection)
+    const ea = [dist3(a[0], a[1]), dist3(a[1], a[2]), dist3(a[0], a[2])], eb = [dist3(b[0], b[1]), dist3(b[1], b[2]), dist3(b[0], b[2])];
+    if (Math.min(...ea) < 3 * Math.sqrt(A.area / A.count)) continue;
+    const r = [eb[0] / ea[0], eb[1] / ea[1], eb[2] / ea[2]];
+    if (Math.max(...r) > 1.1 * Math.min(...r)) continue;
     const T = similarity(a, b);
-    if (!(T.s > 0) || !isFinite(T.s)) continue;
+    if (!plausible(T)) continue;
     // cheap check on correspondences first, then on a subsample
     let ok = 0;
     for (const x of M) { const y = apply(T, P(A, x[0])), z = P(B, x[1]); if ((y[0] - z[0]) ** 2 + (y[1] - z[1]) ** 2 + (y[2] - z[2]) ** 2 < eps * eps * 4) ok++; }
-    if (ok < 6) continue;
+    if (ok < 4) continue;
     const sc = countIn(T, 8);
     if (sc > bestScore) { bestScore = sc; bestT = T; }
   }
-  if (!bestT) return { coverage: 0, scale: 0, mirrored: false };
+  if (!bestT) return { coverage: 0, tight: 0, distinctive: 0, detail: 0, scale: 0, mirrored: false };
   // refine on inliers (ICP-style, a few rounds of nearest-neighbour correspondences)
   let T = bestT;
   for (let round = 0; round < 4; round++) {
@@ -190,10 +240,116 @@ export function coverage(trisA, trisB, { samples = 1536, iters = 1500, seed = 0x
     }
     if (a.length < 10) break;
     const T2 = similarity(a, b);
-    if (T2.s > 0 && countIn(T2, 2) >= countIn(T, 2)) T = T2; else break;
+    if (plausible(T2) && countIn(T2, 2) >= countIn(T, 2)) T = T2; else break;
   }
   const det = T.R[0][0] * (T.R[1][1] * T.R[2][2] - T.R[1][2] * T.R[2][1]) - T.R[0][1] * (T.R[1][0] * T.R[2][2] - T.R[1][2] * T.R[2][0]) + T.R[0][2] * (T.R[1][0] * T.R[2][1] - T.R[1][1] * T.R[2][0]);
-  return { coverage: countIn(T, 1), scale: T.s, mirrored: det < 0 };
+  // Stage 2b: exact-surface ICP + tight coverage.
+  const mi = meshIndex(trisB);
+  const sizeA = T.s * (() => { let mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity]; for (let i = 0; i < A.count; i++) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], A.pts[i * 3 + k]); mx[k] = Math.max(mx[k], A.pts[i * 3 + k]); } return Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]); })();
+  const tol = 0.006 * sizeA;
+  const Tt = icpToMesh(A, T, mi, eps * 1.5, tol);
+  const tight = plausible(Tt) ? tightCoverage(A, Tt, mi, tol) : tightCoverage(A, T, mi, tol);
+  let wIn = 0, wTot = 0;
+  for (let i = 0; i < A.count; i++) { const w = da.weight[i]; wTot += w; if (g.near(apply(T, P(A, i)), eps)) wIn += w; }
+  return { coverage: countIn(T, 1), tight, distinctive: wTot ? wIn / wTot : 0, detail: wTot / A.count, scale: T.s, mirrored: det < 0 };
+}
+
+const dist3 = (u, v) => Math.hypot(u[0] - v[0], u[1] - v[1], u[2] - v[2]);
+
+// ── exact point-to-mesh distance (closest point on triangle, Ericson 5.1.5) ─────────
+function closestOnTri(p, a, b, c) {
+  const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]], ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+  const dot = (u, v) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const d1 = dot(ab, ap), d2 = dot(ac, ap);
+  if (d1 <= 0 && d2 <= 0) return a;
+  const bp = [p[0] - b[0], p[1] - b[1], p[2] - b[2]], d3 = dot(ab, bp), d4 = dot(ac, bp);
+  if (d3 >= 0 && d4 <= d3) return b;
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) { const v = d1 / (d1 - d3); return [a[0] + v * ab[0], a[1] + v * ab[1], a[2] + v * ab[2]]; }
+  const cp = [p[0] - c[0], p[1] - c[1], p[2] - c[2]], d5 = dot(ab, cp), d6 = dot(ac, cp);
+  if (d6 >= 0 && d5 <= d6) return c;
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) { const w = d2 / (d2 - d6); return [a[0] + w * ac[0], a[1] + w * ac[1], a[2] + w * ac[2]]; }
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) { const w = (d4 - d3) / (d4 - d3 + (d5 - d6)); return [b[0] + w * (c[0] - b[0]), b[1] + w * (c[1] - b[1]), b[2] + w * (c[2] - b[2])]; }
+  const den = 1 / (va + vb + vc), v = vb * den, w = vc * den;
+  return [a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w, a[2] + ab[2] * v + ac[2] * w];
+}
+
+function meshIndex(tris) {
+  const n = tris.length / 9;
+  let mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < tris.length; i += 3) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], tris[i + k]); mx[k] = Math.max(mx[k], tris[i + k]); }
+  const diag = Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]);
+  const cell = diag / 48;
+  const g = new Map();
+  const nrm = new Float64Array(n * 3);
+  for (let t = 0; t < n; t++) {
+    const o = t * 9;
+    const ux = tris[o + 3] - tris[o], uy = tris[o + 4] - tris[o + 1], uz = tris[o + 5] - tris[o + 2];
+    const vx = tris[o + 6] - tris[o], vy = tris[o + 7] - tris[o + 1], vz = tris[o + 8] - tris[o + 2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; const l = Math.hypot(nx, ny, nz) || 1;
+    nrm[t * 3] = nx / l; nrm[t * 3 + 1] = ny / l; nrm[t * 3 + 2] = nz / l;
+    const lo = [0, 1, 2].map((k) => Math.floor(Math.min(tris[o + k], tris[o + 3 + k], tris[o + 6 + k]) / cell));
+    const hi = [0, 1, 2].map((k) => Math.floor(Math.max(tris[o + k], tris[o + 3 + k], tris[o + 6 + k]) / cell));
+    for (let x = lo[0]; x <= hi[0]; x++) for (let y = lo[1]; y <= hi[1]; y++) for (let z = lo[2]; z <= hi[2]; z++) {
+      const key = x + "," + y + "," + z; let arr = g.get(key); if (!arr) g.set(key, (arr = [])); arr.push(t);
+    }
+  }
+  return {
+    diag,
+    // closest surface point within radius r: [dist, normal] or null
+    closest(p, r) {
+      const reach = Math.ceil(r / cell);
+      const c = [0, 1, 2].map((k) => Math.floor(p[k] / cell));
+      let best = Infinity, bt = -1, seen = new Set();
+      for (let x = -reach; x <= reach; x++) for (let y = -reach; y <= reach; y++) for (let z = -reach; z <= reach; z++) {
+        const arr = g.get(c[0] + x + "," + (c[1] + y) + "," + (c[2] + z)); if (!arr) continue;
+        for (const t of arr) {
+          if (seen.has(t)) continue; seen.add(t);
+          const o = t * 9;
+          const q = closestOnTri(p, [tris[o], tris[o + 1], tris[o + 2]], [tris[o + 3], tris[o + 4], tris[o + 5]], [tris[o + 6], tris[o + 7], tris[o + 8]]);
+          const d = Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]);
+          if (d < best) { best = d; bt = t; this._q = q; }
+        }
+      }
+      return best <= r ? { d: best, q: this._q, n: [nrm[bt * 3], nrm[bt * 3 + 1], nrm[bt * 3 + 2]] } : null;
+    },
+  };
+}
+
+/**
+ * Tight check after alignment: fraction of A's samples lying within tol (default 0.6% of the
+ * aligned model's size) of B's actual surface, with agreeing surface normals. Real copies
+ * coincide almost exactly; unrelated shapes don't.
+ */
+function tightCoverage(A, T, mi, tol) {
+  let hit = 0;
+  for (let i = 0; i < A.count; i++) {
+    const p = apply(T, [A.pts[i * 3], A.pts[i * 3 + 1], A.pts[i * 3 + 2]]);
+    const c = mi.closest(p, tol);
+    if (!c) continue;
+    const n = [0, 1, 2].map((r) => T.R[r][0] * A.nrm[i * 3] + T.R[r][1] * A.nrm[i * 3 + 1] + T.R[r][2] * A.nrm[i * 3 + 2]);
+    if (Math.abs(n[0] * c.n[0] + n[1] * c.n[1] + n[2] * c.n[2]) > 0.8) hit++;
+  }
+  return hit / A.count;
+}
+
+function icpToMesh(A, T, mi, startR, endR, rounds = 8) {
+  let r = startR;
+  for (let k = 0; k < rounds; k++, r = Math.max(endR, r * 0.6)) {
+    const a = [], b = [];
+    for (let i = 0; i < A.count; i += 2) {
+      const x = [A.pts[i * 3], A.pts[i * 3 + 1], A.pts[i * 3 + 2]];
+      const c = mi.closest(apply(T, x), r);
+      if (c) { a.push(x); b.push(c.q); }
+    }
+    if (a.length < 12) break;
+    const T2 = similarity(a, b);
+    if (!(T2.s > 0) || !isFinite(T2.s)) break;
+    T = T2;
+  }
+  return T;
 }
 
 function nearIdx(B, y, r, _g) {
