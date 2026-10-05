@@ -22,7 +22,7 @@ test on the Logos test fleet: PASS (`hub/two-node.sh`, now with the Storage SPR 
 | H3 | fixed | signatures checked once at ingest/load, `fold(log, admitted=true)` skips them; received events refold once per tick (dirty flag) and save on a 5 s throttle; dedup before verify; load + fold moved out of `onContextReady` |
 | H4 | fixed | served events batched (≤ 48 KB frames), ≤ 200/min; one answer per peer's opening fp per 20 s; catch-up frames older than 2 min (store replays) ignored. Not done: an addressee field |
 | M1 | fixed | `sanitize()` drops non-finite or > 1e7 coordinates; bins clamped; same in the rasteriser and the JS reference |
-| M2 | fixed | per-blob fetch state: candidate rotation, back-off between rounds (30 s doubling, ≤ 30 min), immediate refusal moves on at once, stale attempts ignored; job fails after 3 rounds with the reason, shows "Retrying …" before; asking again resets |
+| M2 | fixed | per-blob fetch state: candidate rotation, back-off between rounds (15 s doubling, ≤ 30 min), immediate refusal moves on at once, stale attempts ignored; job fails after 3 rounds with the reason, shows "Retrying …" before; asking again resets |
 | M3 | fixed | uploads retried every 60 s until a CID exists (refused, failed, timed out, or never started), for every blob I'm responsible for incl. make photos |
 | M4 | partly | envelope limits done; per-author caps and retention not done |
 | M5 | fixed | loam callbacks posted to the module loop; status polled until Connected |
@@ -48,9 +48,11 @@ Found by the live test, fixed in the same pass:
 - **Store replays.** The fleet store re-delivers old `fp`/`ids`/`need` frames on every connect; a fresh node
   answered all of them (156 events served for a 15-event log). Now ignored when > 2 min old.
 
-Open after the live test: a user download queues behind preview fetches of dead CIDs (one Storage
-call at a time, each dead manifest ~30-60 s): 125 s for the download in the last live run vs 20 s
-before. Next: let jobs pre-empt previews, and skip previews of models whose CIDs all failed.
+Open after the live test: the first fetch of a FRESH upload takes 95-135 s on logos.test (3 runs).
+B's log shows `failed to get manifest` twice, then success; A's shows `Timed out providing cid`. The
+time is DHT provider propagation in Storage, not swamp's queueing (user downloads now pre-empt
+previews and the hub sweep, and the first back-off is 15 s). A hub that prefetches on first sight
+hides this for everyone after it.
 
 Severity: **Critical** = a remote peer can take over or crash the network. **High** = a remote peer
 can deny service, or correct data is lost in normal use. **Medium** = a real bug with a narrower

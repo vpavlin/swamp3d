@@ -97,6 +97,7 @@ private:
     void fetchPreviews();
     void retryUploads();
     bool storageFree();
+    bool jobWaiting();
     void storageDone();
 
     void tick();

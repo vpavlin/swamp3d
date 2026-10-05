@@ -87,7 +87,7 @@ unsigned, badly signed, or of an unknown type. Payload size limit: 16 KiB per ev
   by `storageDownloadDone` **or** by polling (the part file reaches the size the signed version
   declares). A part file that grows past that size is cut off. The bytes are hashed while streaming
   and must equal `sha256`, or the file is rejected and the next candidate CID tried. After a full
-  round of candidates: back-off (30 s, doubling, ≤ 30 min); a download job fails after 3 rounds,
+  round of candidates: back-off (15 s, doubling, ≤ 30 min); a download job fails after 3 rounds,
   with the reason. In flight at once: 6 overall, 2 for previews, 3 for a hub's sweep.
 - A **hub** (`SWAMP_HUB=1`) fetches every file, image and fingerprint it sees, with the same retry
   rules, and keeps them.
@@ -96,7 +96,10 @@ unsigned, badly signed, or of an unknown type. Payload size limit: 16 KiB per ev
   host Storage `config.json`, and the holder needs an announced address (`nat: extip:<addr>`).
   Measured on logosctl 0.3.1: without the bootstrap, "failed to get manifest"; with it, the file
   arrived byte-identical. `config.json` keys that libstorage doesn't know (e.g. `disc-port`) make
-  the whole file fail to load. Its Storage config (the host's `config.json`) needs a public `extip`,
+  the whole file fail to load.
+- **Latency of a fresh upload:** on logos.test the first fetch of a just-published file took 95-135 s
+  (DHT provider propagation; the first manifest lookups fail). A user download pauses preview and
+  hub fetches until it's done. Its Storage config (the host's `config.json`) needs a public `extip`,
   `autonat-server`, `relay-server` and a long `block-ttl` (logos-storage).
 
 ## 5. Fold → catalogue state

@@ -472,6 +472,17 @@ void SwampCoreImpl::ensureStorage() {
     }
 }
 
+bool SwampCoreImpl::jobWaiting() {
+    for (const auto& [key, j] : m_jobs) {
+        if (j.status == "done" || j.status == "failed") continue;
+        for (const auto& [sha, name] : j.files) {
+            if (haveBlob(sha) || !m_cat.cids.count(sha)) continue;
+            return true;   // even while it backs off: a preview start would hold Storage ~30 s
+        }
+    }
+    return false;
+}
+
 bool SwampCoreImpl::storageFree() {
     if (m_storageBusy && nowMs() - m_storageBusySince > 2LL * kStorageTimeoutMs) m_storageBusy = false;   // a lost callback
     if (m_storageBusy) return false;
@@ -565,7 +576,9 @@ void SwampCoreImpl::flushAnnouncements() {
     publishState();
 }
 
-static long long backoffMs(int rounds) { return std::min<long long>(30000LL << std::min(rounds, 6), 30LL * 60 * 1000); }
+// 15 s, 30 s, 1 min, ... 30 min. Short at first: a fresh upload often isn't findable in the DHT
+// for the first tens of seconds ("failed to get manifest"), then is.
+static long long backoffMs(int rounds) { return std::min<long long>(15000LL << std::min(std::max(rounds - 1, 0), 7), 30LL * 60 * 1000); }
 
 static bool sha256File(const std::string& path, std::string& hex) {
     std::ifstream f(path, std::ios::binary);
@@ -811,7 +824,13 @@ void SwampCoreImpl::tick() {
                 });
             } catch (...) {}
         }
-        if (m_storageStarted) { pollStorage(); advanceJobs(); retryUploads(); fetchPreviews(); hubSweep(); }
+        if (m_storageStarted) {
+            pollStorage();
+            advanceJobs();
+            retryUploads();
+            // a download the user asked for goes first: no background fetches until it's done
+            if (!jobWaiting()) { fetchPreviews(); hubSweep(); }
+        }
         flushAnnouncements();
         if (m_ready && now - m_lastCatchup > kCatchupEveryMs) catchupRound();
     } catch (const std::exception& e) {
