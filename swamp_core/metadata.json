@@ -1,0 +1,24 @@
+{
+  "name": "swamp_core",
+  "display_name": "Swamp Core",
+  "version": "0.1.0",
+  "type": "core",
+  "interface": "universal",
+  "category": "social",
+  "description": "Swamp core: a decentralized library of 3D models. Signed public catalogue over loam_core, files in Logos Storage (host-owned node), verified downloads, shape fingerprints at publish, optional pinning hub. Runs headless under logosctl and behind the swamp ui_qml view.",
+  "main": "swamp_core_plugin",
+  "dependencies": [
+    "loam_core",
+    "storage_module"
+  ],
+  "nix": {
+    "packages": { "build": ["openssl"], "runtime": ["openssl"] },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": ["OpenSSL"],
+      "extra_sources": [],
+      "extra_include_dirs": ["src"],
+      "extra_link_libraries": ["OpenSSL::Crypto"]
+    }
+  }
+}

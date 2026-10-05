@@ -1,0 +1,18 @@
+{
+  "name": "swamp",
+  "display_name": "Swamp - 3D models",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "category": "social",
+  "description": "A decentralized library of 3D models: browse, download, publish, remix, post makes. Pure-QML view over swamp_core. Built on the Logos tech stack; not affiliated with Logos.",
+  "view": "Main.qml",
+  "icon": "icon.png",
+  "dependencies": [
+    "swamp_core"
+  ],
+  "nix": {
+    "packages": { "build": [], "runtime": [] },
+    "external_libraries": [],
+    "cmake": { "find_packages": [], "extra_sources": [], "extra_include_dirs": [], "extra_link_libraries": [] }
+  }
+}
