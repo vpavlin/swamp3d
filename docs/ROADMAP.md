@@ -25,18 +25,24 @@ Status 2026-10-05. The PoC scope this grew from is docs/POC.md.
    - `SWAMP_HUB=1`;
    - Storage with a public extip, AutoNAT and relay servers, and a long `block-ttl`;
    - clients that bootstrap from it.
-3. **Theft labels v1: whole-object copies.**
+3. **Search without a full mirror** (ADRs 0014-0016), in this order:
+   1. a category field on versions, category topics, per-model record fetch, lazy pictures;
+   2. sharded index snapshots in Storage, with roots on LEZ;
+   3. optional anonymous query hubs, with inclusion proofs, audits and exclusion lists.
+
+   The full mirror stays until step 2 lands.
+4. **Theft labels v1: whole-object copies.**
    - Matches are computed locally on sync: "Possible copy of X by Y", with the evidence.
    - Declared remixes are exempt.
    - Labels inform; they never hide or delete.
-4. **Priority anchoring on LEZ.**
+5. **Priority anchoring on LEZ.**
    - Epoch Merkle roots of the catalogue, with inclusion proofs on labels.
    - Private pre-anchoring of drafts.
-5. **Edited copies.** Stage-2 geometric verification and a triviality gate. This is research; it
+6. **Edited copies.** Stage-2 geometric verification and a triviality gate. This is research; it
    ships when the benchmark numbers justify it.
-6. **Labelers and disputes.** Subscribable labelers, RLN-limited flaggers, an "I'm the original"
+7. **Labelers and disputes.** Subscribable labelers, RLN-limited flaggers, an "I'm the original"
    dispute with anchored proof.
-7. **Tips over LEZ.** Paid models later, if ever.
+8. **Tips over LEZ.** Paid models later, if ever.
 
 ## Decisions (vpavlin, 2026-10-05)
 

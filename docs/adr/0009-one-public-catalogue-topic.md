@@ -1,6 +1,6 @@
 # 0009. The catalogue is one public, signed event log on one topic
 
-- Status: Accepted
+- Status: Accepted for M1; superseded at scale by 0014 (category topics)
 - Date: 2026-10-05
 
 ## Context

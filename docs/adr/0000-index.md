@@ -15,3 +15,6 @@
 | 0011 | [Public files are identified by the plain SHA-256 of their bytes](0011-plain-content-hashes-for-public-files.md) |
 | 0012 | [Built on the Basecamp 0.3 stack from day one](0012-basecamp-0-3-stack.md) |
 | 0013 | [Every version carries its fingerprint from the first release](0013-fingerprint-at-publish.md) |
+| 0014 | [Subscribe to categories; nobody mirrors the whole catalogue](0014-category-topics.md) |
+| 0015 | [Global search uses sharded, signed index snapshots in Logos Storage](0015-sharded-index-snapshots.md) |
+| 0016 | [Optional anonymous query hubs, kept honest by redundancy, audits and declared exclusions](0016-anonymous-query-hubs.md) |
