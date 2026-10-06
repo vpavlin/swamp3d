@@ -633,10 +633,13 @@ Item {
                         Repeater { model: root.st.index ? root.st.index.omissions : []
                             delegate: T2 { Layout.fillWidth: true; color: root.cErr
                                 text: "Caught: " + modelData.indexerName + " left out your \"" + modelData.title + "\" without declaring it. Your searches no longer prefer this index." } }
+                        Repeater { model: root.st.index ? root.st.index.suspects : []
+                            delegate: T2 { Layout.fillWidth: true; color: root.cWarn
+                                text: "\"" + modelData.title + "\" isn't in " + modelData.indexerName + "'s index yet. Your node re-sent it; if a newer index still leaves it out, that index gets flagged." } }
                         Repeater { model: root.st.index ? root.st.index.excludedMine : []
                             delegate: T2 { Layout.fillWidth: true; color: root.cWarn
                                 text: modelData.indexerName + " declines to carry your \"" + modelData.title + "\"" + (modelData.why ? ": " + modelData.why : "") + ". That's its published policy; other indexes still carry it." } }
-                        T3 { visible: !!root.st.index && root.st.index.omissions.length === 0 && root.st.index.excludedMine.length === 0; text: "No problems found." }
+                        T3 { visible: !!root.st.index && root.st.index.omissions.length === 0 && root.st.index.excludedMine.length === 0 && (root.st.index.suspects || []).length === 0; text: "No problems found." }
                     }
                     Card {
                         T1 { text: "This node" }

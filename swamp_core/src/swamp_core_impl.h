@@ -132,6 +132,7 @@ private:
     long long m_slicerAt = 0;
     std::string launchSlicer(const DownloadJob& j);
     swamp::json omissionsJson();
+    swamp::json suspectsJson();
     swamp::json excludedMineJson();
     std::vector<std::string> cidsFor(const std::string& sha);
     long long imageSize(const std::string& sha);
@@ -188,7 +189,8 @@ private:
     bool m_indexer = false, m_privateShards = false;
     long long m_lastIndex = 0, m_indexEveryMs = 30LL * 60 * 1000;
     long long m_lastInclusion = 0, m_inclusionEveryMs = 5LL * 60 * 1000, m_inclusionGraceMs = 10LL * 60 * 1000;
-    std::map<std::string, swamp::json> m_omissions;
+    std::map<std::string, swamp::json> m_omissions, m_suspects;
+    long long m_omissionConfirmMs = 10LL * 60 * 1000;
     std::map<std::string, std::string> m_excludedMine;
     long m_indexesBuilt = 0, m_privacyDowngrades = 0, m_slicerLaunches = 0;
     std::map<std::string, long long> m_announcedAt, m_answeredAt;

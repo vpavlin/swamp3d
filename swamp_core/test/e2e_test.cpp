@@ -47,6 +47,7 @@ int main(int argc, char** argv) {
     setenv("SWAMP_INDEX_EVERY_MS", "1000", 1);   // the hub indexes every second here
     setenv("SWAMP_INCLUSION_EVERY_MS", "1000", 1);   // creators audit indexers every second
     setenv("SWAMP_INCLUSION_GRACE_MS", "0", 1);
+    setenv("SWAMP_OMISSION_CONFIRM_MS", "1500", 1);
     const std::string stl1 = repo + "/bench/data/raw/74890.stl", stl2 = repo + "/bench/data/raw/278455.stl";
 
     Peer* alice = spawn("alice");
@@ -357,9 +358,20 @@ int main(int argc, char** argv) {
             policy->call(policy->core.resync()); rogue->call(rogue->core.resync());
             std::string rogueAddr = rogue->snap()["me"]["address"];
             CHECK(waitFor([&] { return alice->snap()["index"]["known"].get<int>() >= 3; }, 15000), "Alice sees three indexers' manifests");
+            // first only a suspect (maybe it never got the model): Alice re-sends it...
             CHECK(waitFor([&] {
+                for (const auto& o : json(alice->snap()["index"]["suspects"])) if (o["indexer"] == rogueAddr && o["modelId"] == toyId) return true;
+                return false; }, 40000), "a missing model first makes the indexer a suspect, and Alice re-sends it");
+            json early = json(alice->snap()["index"]["omissions"]);
+            bool notYet = true; for (const auto& o : early) if (o["indexer"] == rogueAddr) notYet = false;
+            CHECK(notYet, "...not yet accused");
+            // ...the rogue builds a newer index (the catalogue changed) and still leaves it out: caught
+            // keep the catalogue changing so every indexer rebuilds past the confirmation window
+            QElapsedTimer nudge; nudge.start(); int n = 0;
+            CHECK(waitFor([&] {
+                if (nudge.elapsed() > 2500) { nudge.restart(); bob->core.comment(toyId, "nudge " + std::to_string(++n)); }
                 for (const auto& o : json(alice->snap()["index"]["omissions"])) if (o["indexer"] == rogueAddr && o["modelId"] == toyId) return true;
-                return false; }, 40000), "Alice's node catches the rogue indexer leaving out her model (signed evidence)");
+                return false; }, 60000), "a newer index that still leaves it out gets the rogue caught (signed evidence)");
             json ev;
             for (const auto& o : json(alice->snap()["index"]["omissions"])) if (o["indexer"] == rogueAddr) ev = o;
             CHECK(ev.is_object() && ev.value("manifestEvent", "").size() > 0 && (ev.value("shardSha256", "").size() == 64 || ev.value("shardMissing", false)),

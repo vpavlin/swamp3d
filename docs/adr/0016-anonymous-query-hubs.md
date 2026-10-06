@@ -43,6 +43,15 @@ and hash), never free-form claims.
   **publicly checkable proof of omission**. Clients drop that indexer automatically, and the
   proof can be shared.
 
+**Missing is not yet omitted (found in the Basecamp test, 0.5.1).** An indexer that was offline,
+or that ran while the creator's node was offline, simply never received the model. Flagging it on
+first sight produced false accusations against short-lived test indexers. So:
+- the first time a model is missing, the indexer is only a **suspect**, and the creator's node
+  **re-sends** the model's events on its category topic;
+- the indexer is **caught** only if an index it built at least `SWAMP_OMISSION_CONFIRM_MS`
+  (10 min) after the re-send still leaves the model out;
+- an indexer that stops publishing is never accused.
+
 **Live query hubs are audited.**
 - Clients hold their subscribed categories in full, so they occasionally send hubs queries whose
   answers they already know.

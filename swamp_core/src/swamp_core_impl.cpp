@@ -27,7 +27,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.0";
+static const char* SWAMP_VERSION = "0.5.1";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -175,6 +175,7 @@ void SwampCoreImpl::setupDataDir() {
     if (const char* ev = getenv("SWAMP_INDEX_EVERY_MS")) m_indexEveryMs = std::max(1000LL, atoll(ev));
     if (const char* ie = getenv("SWAMP_INCLUSION_EVERY_MS")) m_inclusionEveryMs = std::max(1000LL, atoll(ie));
     if (const char* ig = getenv("SWAMP_INCLUSION_GRACE_MS")) m_inclusionGraceMs = std::max(0LL, atoll(ig));
+    if (const char* oc = getenv("SWAMP_OMISSION_CONFIRM_MS")) m_omissionConfirmMs = std::max(0LL, atoll(oc));
     if (const char* t = getenv("SWAMP_TEST_OMIT")) m_testOmit = t;
     const char* pf = getenv("SWAMP_PRIVATE_FETCH");
     m_privateShards = pf && (std::string(pf) == "1" || std::string(pf) == "true");
@@ -212,6 +213,11 @@ void SwampCoreImpl::saveSettings() {
 json SwampCoreImpl::omissionsJson() {
     json a = json::array();
     for (const auto& [who, ev] : m_omissions) a.push_back(ev);
+    return a;
+}
+json SwampCoreImpl::suspectsJson() {
+    json a = json::array();
+    for (const auto& [k, v] : m_suspects) a.push_back(v);
     return a;
 }
 json SwampCoreImpl::excludedMineJson() {
@@ -1126,7 +1132,7 @@ std::string SwampCoreImpl::snapshot() {
                 {"slicer", findSlicer()},
                 {"printer", printerPublic()}, {"printJob", m_pjob}, {"discovering", m_discovering}, {"discovered", m_discovered},
                 {"index", {{"indexer", m_indexer}, {"built", m_indexesBuilt}, {"known", m_cat.indexes.size()}, {"privacyDowngrades", m_privacyDowngrades},
-                           {"omissions", omissionsJson()}, {"excludedMine", excludedMineJson()}}},
+                           {"omissions", omissionsJson()}, {"suspects", suspectsJson()}, {"excludedMine", excludedMineJson()}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
                 {"catalog", {{"events", m_log.size()}, {"models", visible}, {"rejected", m_cat.rejected}, {"cids", m_cat.cids.size()}}},
                 {"counters", {{"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
@@ -1391,14 +1397,31 @@ void SwampCoreImpl::checkInclusion() {
             json sh = shard(mf, key);
             if (sh.is_null()) { m_lastInclusion = now - m_inclusionEveryMs + 5000; continue; }   // fetching: look again soon
             bool there = sh.contains("entries") && sh["entries"].contains(id);
-            if (!there && !m_omissions.count(who)) {
-                std::string sha = mf.contains("shards") && mf["shards"].contains(key) ? str(mf["shards"][key], "sha256") : "";
-                m_omissions[who] = json{{"indexer", who}, {"indexerName", nameOf(who)}, {"manifestEvent", str(mf, "eventId")},
-                                        {"epoch", num(mf, "epoch")}, {"modelId", id}, {"title", m.versions.back().value("title", "")},
-                                        {"shard", key}, {"shardSha256", sha}, {"shardMissing", sha.empty()}, {"modelCreated", m.created}, {"seen", now}};
-                fprintf(stderr, "[swamp] OMISSION: indexer %s left out my model %s (shard %s)\n", who.substr(0, 10).c_str(), id.substr(0, 8).c_str(), key.c_str());
+            std::string skey = who + "|" + id;
+            if (there) { m_suspects.erase(skey); continue; }
+            if (m_omissions.count(who)) continue;
+            // Missing could just mean the indexer never received it (it was offline, or we were).
+            // First time: a suspect - re-send the model's events so it can. Caught only if an
+            // index built well after that re-send still leaves it out (ADR 0016).
+            auto sp = m_suspects.find(skey);
+            if (sp == m_suspects.end()) {
+                m_suspects[skey] = json{{"indexer", who}, {"indexerName", nameOf(who)}, {"modelId", id}, {"title", m.versions.back().value("title", "")}, {"since", now}};
+                std::vector<Event> mine;
+                for (const auto& e : m_log) if (index::modelOfEvent(e, m_cat) == id) mine.push_back(e);
+                serveEvents(categoryTopic(m.category), mine);
+                fprintf(stderr, "[swamp] index %s lacks my model %s: re-sent its %zu events\n", who.substr(0, 10).c_str(), id.substr(0, 8).c_str(), mine.size());
                 publishState();
+                continue;
             }
+            if (num(mf, "epoch") * 1000 < num(sp->second, "since") + m_omissionConfirmMs) continue;   // no index built since then yet
+            std::string sha = mf.contains("shards") && mf["shards"].contains(key) ? str(mf["shards"][key], "sha256") : "";
+            m_omissions[who] = json{{"indexer", who}, {"indexerName", nameOf(who)}, {"manifestEvent", str(mf, "eventId")},
+                                    {"epoch", num(mf, "epoch")}, {"modelId", id}, {"title", m.versions.back().value("title", "")},
+                                    {"shard", key}, {"shardSha256", sha}, {"shardMissing", sha.empty()}, {"modelCreated", m.created},
+                                    {"resentAt", num(sp->second, "since")}, {"seen", now}};
+            m_suspects.erase(skey);
+            fprintf(stderr, "[swamp] OMISSION: indexer %s still leaves out my model %s after a re-send (shard %s)\n", who.substr(0, 10).c_str(), id.substr(0, 8).c_str(), key.c_str());
+            publishState();
         }
     }
 }
