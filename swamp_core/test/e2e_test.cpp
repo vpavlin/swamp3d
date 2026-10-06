@@ -183,6 +183,53 @@ int main(int argc, char** argv) {
         unsetenv("SWAMP_SLICER");
     }
 
+    // print on a (fake) Bambu Lab A1 over the LAN: find, configure, slice with its profile, confirm,
+    // upload over FTPS, start over MQTT (bambu_mock.py, started by run-tests.sh)
+    if (getenv("SWAMP_MOCK_PRINTER")) {
+        std::string mockDir = getenv("SWAMP_MOCK_PRINTER");
+        std::string here = getenv("SWAMP_TEST_DIR") ? getenv("SWAMP_TEST_DIR") : ".";
+        fs::create_directories(root + "/orca-profiles/BBL/machine");
+        const char* realOrca = getenv("SWAMP_TEST_REAL_ORCA");   // the real OrcaSlicer AppImage, if given
+        setenv("SWAMP_ORCA", realOrca ? realOrca : (here + "/fake_orca.sh").c_str(), 1);
+        if (!realOrca) setenv("SWAMP_ORCA_PROFILES", (root + "/orca-profiles/BBL").c_str(), 1);
+        json fp = json::parse(bob->core.findPrinters());
+        CHECK(fp.value("running", false), "finding printers starts listening");
+        json found;
+        CHECK(waitFor([&] { found = json::parse(bob->core.findPrinters()); return !found.value("running", true) && found["printers"].size() == 1; }, 12000),
+              "the printer is found on the LAN (" + found.dump() + ")");
+        json pr = found["printers"][0];
+        CHECK(pr.value("serial", "") == "03919A3B0000001" && pr.value("model", "") == "N2S", "...with its serial and model");
+        CHECK(!json::parse(bob->core.setPrinter(json{{"ip", "127.0.0.1"}, {"serial", pr["serial"]}}.dump())).value("ok", true), "an access code is required");
+        json sp = json::parse(bob->core.setPrinter(json{{"ip", "127.0.0.1"}, {"serial", pr["serial"]}, {"accessCode", "12345678"}, {"model", pr["model"]},
+                                                         {"mqttPort", atoi(getenv("SWAMP_MOCK_MQTT"))}, {"ftpsPort", atoi(getenv("SWAMP_MOCK_FTPS"))}}.dump()));
+        CHECK(sp.value("ok", false) && sp["printer"].value("name", "") == "Bambu Lab A1" && !sp["printer"].contains("accessCode"), "the printer is saved; the access code is never handed back");
+        CHECK((fs::status(root + "/bob/data/printer.json").permissions() & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none, "printer.json is owner-only");
+        CHECK(waitFor([&] { json st = json::parse(bob->core.printerStatus()); return st["printer"]["state"].is_object() && !st["printer"]["state"].value("state", "").empty(); }, 10000),
+              "the printer reports its state");
+        json pp = json::parse(bob->core.preparePrint(mid, "1"));
+        CHECK(pp.value("ok", false), "prepare: accepted");
+        json job;
+        CHECK(waitFor([&] { job = bob->snap()["printJob"]; return job.is_object() && (job["stage"] == "ready" || job["stage"] == "failed"); }, 180000) && job["stage"] == "ready",
+              "prepare: downloaded, verified and sliced (" + job.dump() + ")");
+        CHECK(realOrca ? !job["estimate"].value("time", "").empty() : (job["estimate"]["time"] == "1h 5m 3s" && job["estimate"]["layers"] == 42),
+              "the estimate comes from the slicer (" + job["estimate"].dump() + ")");
+        CHECK(job["estimate"].value("filamentG", 0) > 0, "...with the filament it needs");
+        if (!realOrca) {
+            std::string args; { std::ifstream f(here + "/fake-orca-args.txt"); std::stringstream ss; ss << f.rdbuf(); args = ss.str(); }
+            CHECK(args.find("Bambu Lab A1 0.4 nozzle.json") != std::string::npos && args.find("0.20mm Standard @BBL A1.json") != std::string::npos &&
+                  args.find("Bambu PLA Basic @BBL A1.json") != std::string::npos, "sliced with the A1's default printer, process and PLA profiles");
+        }
+        CHECK(!json::parse(bob->core.startPrint("no")).value("ok", true), "nothing is sent without an explicit confirmation");
+        CHECK(json::parse(bob->core.startPrint("yes")).value("ok", false), "confirmed: sending");
+        CHECK(waitFor([&] { job = bob->snap()["printJob"]; return job["stage"] == "sent" || job["stage"] == "failed"; }, 20000) && job["stage"] == "sent",
+              "the printer accepted the job (" + job.dump() + ")");
+        std::string remote = job.value("remote", "");
+        CHECK(fs::exists(mockDir + "/sd/" + remote), "the sliced file is on the printer's SD card");
+        CHECK(waitFor([&] { json st = json::parse(bob->core.printerStatus()); return st["printer"]["state"].is_object() && st["printer"]["state"]["state"] == "PREPARE"; }, 15000),
+              "...and the printer moved to PREPARE");
+        unsetenv("SWAMP_ORCA"); unsetenv("SWAMP_ORCA_PROFILES");
+    }
+
     // malformed and hostile frames: dropped and counted, the node keeps working (review C2)
     {
         long badBefore = bob->snap()["counters"]["rxBad"].get<long>();

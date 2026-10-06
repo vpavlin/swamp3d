@@ -3,6 +3,9 @@
 #include "logos_sync/catchup.hpp"
 #include "swamp_fp.hpp"
 #include "swamp_index.hpp"
+#include "swamp_bambu.hpp"
+#include <thread>
+#include <cmath>
 #define SWAMP_THUMB_QT 1   // the module links Qt Core: compress thumbnails with qCompress
 #include "swamp_thumb.hpp"
 #include <QTimer>
@@ -24,7 +27,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.4.1";
+static const char* SWAMP_VERSION = "0.5.0";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -232,6 +235,7 @@ json SwampCoreImpl::categoriesJson() {
 
 void SwampCoreImpl::loadAll() {
     loadSettings();
+    { std::string ps; json pj = readFile(m_dataDir + "/printer.json", ps) ? json::parse(ps, nullptr, false) : json(); if (pj.is_object()) m_printer = pj; }
     std::string s;
     json id = readFile(m_dataDir + "/identity.json", s) ? json::parse(s, nullptr, false) : json();
     logos_sync::Bytes priv;
@@ -896,6 +900,7 @@ void SwampCoreImpl::advanceJobs() {
                 j.status = err.empty() ? "done" : "failed";
                 j.error = err.empty() ? "" : "Couldn't write to " + j.dir + " (" + err + ")";
                 if (err.empty() && m_openAfter.erase(key)) { std::string why = launchSlicer(j); if (!why.empty()) j.error = why; }
+                if (err.empty() && str(m_pjob, "stage") == "downloading" && str(m_pjob, "key") == key) beginSlice(j);
             } else j.status = "fetching";
         }
         if (j.status != prevStatus || j.error != prevError) changed = true;
@@ -1119,6 +1124,7 @@ std::string SwampCoreImpl::snapshot() {
                 {"me", {{"address", m_id.address}, {"profile", profile}}},
                 {"categories", categoriesJson()},
                 {"slicer", findSlicer()},
+                {"printer", printerPublic()}, {"printJob", m_pjob}, {"discovering", m_discovering}, {"discovered", m_discovered},
                 {"index", {{"indexer", m_indexer}, {"built", m_indexesBuilt}, {"known", m_cat.indexes.size()}, {"privacyDowngrades", m_privacyDowngrades},
                            {"omissions", omissionsJson()}, {"excludedMine", excludedMineJson()}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
@@ -1498,6 +1504,304 @@ void SwampCoreImpl::refreshRecord(const std::string& modelId) {
     bool pending = false;
     fetchRecord(modelId, pending);
     if (pending) m_recordAt[modelId] = nowMs() - kRecordRefreshMs + 5000;   // shard on its way: look again soon
+}
+
+
+// ---- print on a Bambu Lab printer over the LAN (no cloud) -------------------------------------
+// The printer: LAN-only + Developer Mode (swamp_bambu.hpp). The flow, one job at a time:
+//   preparePrint -> downloading (verified) -> slicing (OrcaSlicer CLI, the printer's default
+//   profile, geometry only) -> ready {estimate} -> startPrint (the user confirmed) -> uploading
+//   (FTPS) -> starting (MQTT project_file) -> sent
+// Blocking network and slicing run on a worker thread; results come back on the module loop.
+void SwampCoreImpl::runAsync(std::function<json()> work, std::function<void(json)> done) {
+    auto life = m_life;
+    std::thread([this, life, work, done] {
+        json r;
+        try { r = work(); } catch (const std::exception& e) { r = json{{"ok", false}, {"error", e.what()}}; }
+        if (*life) onLoop([this, life, done, r] { if (!*life) return; std::lock_guard<std::recursive_mutex> lk(m_mtx); done(r); });
+    }).detach();
+}
+
+// Which profile set the printer's model uses (Orca's bundled BBL profiles).
+static json profilesFor(const std::string& model) {
+    std::string m = model;
+    for (auto& c : m) c = (char)std::tolower((unsigned char)c);
+    if (m == "n1" || m == "a1 mini" || m == "a1mini" || m == "a1m")
+        return json{{"label", "Bambu Lab A1 mini"}, {"machine", "Bambu Lab A1 mini 0.4 nozzle"}, {"process", "0.20mm Standard @BBL A1M"}, {"filament", "Bambu PLA Basic @BBL A1M"}};
+    if (m == "n2s" || m == "a1")
+        return json{{"label", "Bambu Lab A1"}, {"machine", "Bambu Lab A1 0.4 nozzle"}, {"process", "0.20mm Standard @BBL A1"}, {"filament", "Bambu PLA Basic @BBL A1"}};
+    return nullptr;
+}
+
+bambu::Printer SwampCoreImpl::printerConf() {
+    bambu::Printer p;
+    p.ip = str(m_printer, "ip"); p.serial = str(m_printer, "serial"); p.accessCode = str(m_printer, "accessCode");
+    p.model = str(m_printer, "model"); p.name = str(m_printer, "name");
+    if (num(m_printer, "mqttPort") > 0) p.mqttPort = (int)num(m_printer, "mqttPort");
+    if (num(m_printer, "ftpsPort") > 0) p.ftpsPort = (int)num(m_printer, "ftpsPort");
+    return p;
+}
+json SwampCoreImpl::printerPublic() {
+    if (!m_printer.is_object() || str(m_printer, "ip").empty()) return nullptr;
+    json pr = profilesFor(str(m_printer, "model"));
+    return json{{"ip", str(m_printer, "ip")}, {"serial", str(m_printer, "serial")}, {"model", str(m_printer, "model")},
+                {"name", str(m_printer, "name").empty() ? (pr.is_null() ? "Bambu Lab printer" : str(pr, "label")) : str(m_printer, "name")},
+                {"supported", !pr.is_null()}, {"hasAccessCode", !str(m_printer, "accessCode").empty()}, {"state", m_printerState},
+                {"stateError", m_printerStateErr}, {"stateAt", m_printerStateAt}};
+}
+
+std::string SwampCoreImpl::findPrinters() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    // a fresh 6-second listen unless one is running or just finished (polling must not restart it)
+    if (!m_discovering && nowMs() - m_discoveredAt > 15000) {
+        m_discovering = true;
+        int port = 2021;
+        if (const char* dp = getenv("SWAMP_BAMBU_SSDP_PORT")) port = atoi(dp);
+        runAsync([port] {
+            json a = json::array();
+            for (const auto& p : bambu::discover(6000, port)) a.push_back({{"ip", p.ip}, {"serial", p.serial}, {"model", p.model}, {"name", p.name}});
+            return json{{"printers", a}};
+        }, [this](json r) { m_discovering = false; m_discoveredAt = nowMs(); m_discovered = r.value("printers", json::array()); publishState(); });
+    }
+    return ok(json{{"running", m_discovering}, {"printers", m_discovered}});
+}
+
+std::string SwampCoreImpl::setPrinter(std::string printerJson) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    json p = parseArg(printerJson);
+    if (!p.is_object()) return fail("The printer settings are not valid JSON");
+    std::string ip = clip(p, "ip", 64), serial = clip(p, "serial", 40), code = clip(p, "accessCode", 32);
+    if (ip.empty() || serial.empty()) return fail("The printer needs an IP address and a serial number (both shown on the printer, or use Find printers)");
+    if (code.empty() && str(m_printer, "serial") == serial) code = str(m_printer, "accessCode");   // keep the saved one
+    if (code.empty()) return fail("Enter the printer's access code (Settings > LAN only mode on the printer's screen)");
+    m_printer = json{{"kind", "bambu"}, {"ip", ip}, {"serial", serial}, {"accessCode", code}, {"model", clip(p, "model", 32)}, {"name", clip(p, "name", 60)}};
+    for (const char* k : {"mqttPort", "ftpsPort"}) if (num(p, k) > 0) m_printer[k] = num(p, k);
+    writeFile(m_dataDir + "/printer.json", m_printer.dump());
+    std::error_code ec;   // the access code: owner-only
+    fs::permissions(m_dataDir + "/printer.json", fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+    m_printerState = nullptr; m_printerStateAt = 0; m_printerStateErr.clear();
+    refreshPrinterState();
+    return ok(json{{"printer", printerPublic()}});
+}
+
+void SwampCoreImpl::refreshPrinterState() {
+    if (m_printerPolling || str(m_printer, "ip").empty()) return;
+    m_printerPolling = true;
+    bambu::Printer p = printerConf();
+    runAsync([p] {
+        json st; std::string err;
+        bool okk = bambu::status(p, st, err);
+        return json{{"ok", okk}, {"state", st}, {"error", err}};
+    }, [this](json r) {
+        m_printerPolling = false;
+        m_printerStateAt = nowMs();
+        if (r.value("ok", false)) {
+            const json& st = r["state"];
+            m_printerState = json{{"state", str(st, "gcode_state")}, {"percent", num(st, "mc_percent")}, {"remainingMin", num(st, "mc_remaining_time")},
+                                  {"job", str(st, "subtask_name")}, {"nozzle", st.value("nozzle_temper", 0.0)}, {"bed", st.value("bed_temper", 0.0)}};
+            m_printerStateErr.clear();
+        } else m_printerStateErr = r.value("error", "no answer");
+        publishState();
+    });
+}
+
+std::string SwampCoreImpl::printerStatus() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (nowMs() - m_printerStateAt > 10000) refreshPrinterState();
+    return ok(json{{"printer", printerPublic()}, {"job", m_pjob}});
+}
+
+// OrcaSlicer (or Bambu Studio) on this machine, plus the folder holding its BBL profiles - for an
+// AppImage, the three profile files are extracted once into <data>/orca/.
+json SwampCoreImpl::orcaFor(const json& profiles, std::string& err) {
+    json sl = findSlicer();
+    std::string prog = sl.is_object() ? str(sl, "program") : "", name = sl.is_object() ? str(sl, "name") : "";
+    if (const char* o = getenv("SWAMP_ORCA")) { prog = o; name = "OrcaSlicer"; sl = json{{"program", prog}, {"args", json::array()}}; }
+    if (prog.empty() || (name.find("Orca") == std::string::npos && name.find("Bambu") == std::string::npos)) {
+        err = "Printing to a Bambu Lab printer needs OrcaSlicer or Bambu Studio installed (it slices with the printer's own profile)";
+        return nullptr;
+    }
+    auto findIn = [&](const std::string& root) -> std::string {
+        std::error_code ec;
+        if (!fs::is_directory(root, ec)) return "";
+        auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+        for (int seen = 0; it != fs::recursive_directory_iterator() && seen < 200000; it.increment(ec), seen++) {
+            if (ec) break;
+            if (it->path().filename() == str(profiles, "machine") + ".json" && it->path().parent_path().filename() == "machine")
+                return it->path().parent_path().parent_path().string();   // .../profiles/BBL
+        }
+        return "";
+    };
+    std::string bbl;
+    if (const char* pd = getenv("SWAMP_ORCA_PROFILES")) bbl = pd;
+    bool appimage = lowerExt(prog) == "appimage";
+    if (!bbl.empty()) {
+    } else if (appimage) {
+        std::string dir = m_dataDir + "/orca";
+        bbl = findIn(dir);
+        if (bbl.empty()) {
+            std::error_code ec; fs::create_directories(dir, ec);
+            for (const char* kind : {"machine", "process", "filament"}) {
+                std::string file = std::string("resources/profiles/BBL/") + kind + "/" + str(profiles, kind) + ".json";
+                QProcess x; x.setWorkingDirectory(QString::fromStdString(dir));
+                x.start(QString::fromStdString(prog), {"--appimage-extract", QString::fromStdString(file)});
+                x.waitForFinished(120000);
+            }
+            bbl = findIn(dir);
+        }
+    } else {
+        for (const std::string& root : {fs::path(prog).parent_path().parent_path().string(), std::string("/usr/share"), std::string("/opt"), std::string("/app/share"), homeDir() + "/.local/share",
+                                        std::string("/var/lib/flatpak/app/io.github.softfever.OrcaSlicer"), std::string("/var/lib/flatpak/app/com.bambulab.BambuStudio")}) {
+            bbl = findIn(root);
+            if (!bbl.empty()) break;
+        }
+    }
+    if (bbl.empty()) { err = "Couldn't find " + name + "'s Bambu Lab profiles"; return nullptr; }
+    return json{{"program", prog}, {"args", sl["args"]}, {"name", name}, {"bbl", bbl}};
+}
+
+std::string SwampCoreImpl::preparePrint(std::string modelId, std::string version) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
+    std::string stage = str(m_pjob, "stage");
+    if (stage == "downloading" || stage == "slicing" || stage == "uploading" || stage == "starting") return fail("A print is already being prepared");
+    if (str(m_printer, "ip").empty()) return fail("Set up your printer first (Me > Printer)");
+    json prof = profilesFor(str(m_printer, "model"));
+    if (prof.is_null()) return fail("Only the Bambu Lab A1 and A1 mini are supported so far");
+    modelId = unquote(modelId);
+    auto it = m_cat.models.find(modelId);
+    if (it == m_cat.models.end() || it->second.versions.empty()) return fail("No such model");
+    int v = atoi(unquote(version).c_str());
+    if (v <= 0) v = (int)it->second.versions.size();
+    std::string key = modelId + "@" + std::to_string(v);
+    m_pjob = json{{"stage", "downloading"}, {"key", key}, {"modelId", modelId}, {"v", v}, {"title", it->second.versions[v - 1].value("title", "")},
+                  {"printer", str(prof, "label")}, {"profile", str(prof, "process")}, {"filament", str(prof, "filament")}, {"message", "Downloading and verifying the files..."}, {"at", nowMs()}};
+    auto jt = m_jobs.find(key);
+    if (jt != m_jobs.end() && jt->second.status == "done") { beginSlice(jt->second); return ok(json{{"job", m_pjob}}); }
+    std::string r = download(modelId, std::to_string(v));
+    json rj = json::parse(r, nullptr, false);
+    if (!rj.is_object() || !rj.value("ok", false)) { m_pjob = nullptr; return r; }
+    return ok(json{{"job", m_pjob}});
+}
+
+// Slice what was downloaded - geometry only: STL/OBJ/STEP as they are; a 3MF is first reduced to
+// an STL, so settings and custom G-code embedded by whoever published it never reach the printer.
+void SwampCoreImpl::beginSlice(const DownloadJob& j) {
+    json prof = profilesFor(str(m_printer, "model"));
+    std::string err;
+    json orca = orcaFor(prof, err);
+    if (orca.is_null()) { m_pjob["stage"] = "failed"; m_pjob["message"] = err; publishState(); return; }
+    std::vector<std::string> meshes, projects;
+    for (const auto& [sha, name] : j.files) {
+        std::string e = lowerExt(name), path = j.dir + "/" + name;
+        if (e == "stl" || e == "obj" || e == "step" || e == "stp" || e == "amf") meshes.push_back(path);
+        else if (e == "3mf") projects.push_back(path);
+    }
+    if (meshes.empty() && projects.empty()) { m_pjob["stage"] = "failed"; m_pjob["message"] = "This version has no model files to print"; publishState(); return; }
+    m_pjob["stage"] = "slicing";
+    m_pjob["message"] = "Slicing with " + str(orca, "name") + " (" + str(prof, "process") + ", " + str(prof, "filament") + ")...";
+    publishState();
+    std::string out = m_dataDir + "/print/" + newId().substr(0, 8), cfg = m_dataDir + "/orca-config";
+    std::string remote = "swamp-" + str(m_pjob, "modelId").substr(0, 8) + "-v" + std::to_string(num(m_pjob, "v")) + ".gcode.3mf";
+    runAsync([orca, prof, meshes, projects, out, cfg, remote] {
+        std::error_code ec;
+        fs::create_directories(out, ec); fs::create_directories(cfg, ec);
+        auto run = [&](QStringList args, std::string& log) {
+            QProcess p;
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            env.insert("XDG_CONFIG_HOME", QString::fromStdString(cfg));   // don't touch the user's own slicer settings
+            p.setProcessEnvironment(env);
+            QStringList all;
+            for (const auto& a : orca["args"]) all << QString::fromStdString(a.get<std::string>());
+            all << args;
+            p.start(QString::fromStdString(str(orca, "program")), all);
+            bool fin = p.waitForFinished(15 * 60 * 1000);
+            log = p.readAllStandardOutput().toStdString() + p.readAllStandardError().toStdString();
+            return fin && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
+        };
+        std::vector<std::string> inputs = meshes;
+        for (size_t i = 0; i < projects.size(); i++) {   // 3MF -> geometry only
+            std::string sub = out + "/geom" + std::to_string(i), log;
+            fs::create_directories(sub, ec);
+            if (!run({"--export-stl", "--outputdir", QString::fromStdString(sub), QString::fromStdString(projects[i])}, log))
+                return json{{"ok", false}, {"error", "Couldn't read the shapes out of " + fs::path(projects[i]).filename().string()}};
+            for (const auto& de : fs::directory_iterator(sub, ec)) if (lowerExt(de.path().string()) == "stl") inputs.push_back(de.path().string());
+        }
+        std::string bbl = str(orca, "bbl"), log;
+        QStringList args{"--arrange", "1", "--slice", "1",
+                         "--load-settings", QString::fromStdString(bbl + "/machine/" + str(prof, "machine") + ".json;" + bbl + "/process/" + str(prof, "process") + ".json"),
+                         "--load-filaments", QString::fromStdString(bbl + "/filament/" + str(prof, "filament") + ".json"),
+                         "--outputdir", QString::fromStdString(out), "--export-3mf", QString::fromStdString(remote)};
+        for (const auto& in : inputs) args << QString::fromStdString(in);
+        if (!run(args, log)) return json{{"ok", false}, {"error", "Slicing failed: " + log.substr(log.size() > 300 ? log.size() - 300 : 0)}};
+        std::string file = out + "/" + remote, gcode;
+        if (!fs::exists(file, ec)) return json{{"ok", false}, {"error", "The slicer produced no file"}};
+        // the estimate, from the G-code header
+        json est = json::object();
+        std::ifstream g(out + "/plate_1.gcode");
+        std::string line;
+        // the header has time and layers; the filament totals come later in the file
+        while (std::getline(g, line)) {
+            if (line.empty() || line[0] != ';') continue;
+            auto at = line.find("total estimated time: ");
+            if (at != std::string::npos) est["time"] = line.substr(at + 22);
+            if (line.rfind("; total layer number: ", 0) == 0) est["layers"] = atoi(line.c_str() + 22);
+            if (line.rfind("; filament used [mm] = ", 0) == 0) est["filamentM"] = std::round(atof(line.c_str() + 23) / 100.0) / 10.0;
+            if (line.rfind("; filament used [cm3] = ", 0) == 0) est["filamentG"] = std::round(atof(line.c_str() + 24) * 1.24);   // PLA
+            if (est.contains("time") && est.contains("layers") && est.contains("filamentG")) break;
+        }
+        if (!est.contains("filamentG") && est.contains("filamentM"))   // 1.75 mm PLA
+            est["filamentG"] = std::round(est["filamentM"].get<double>() * 1000.0 * 3.14159265 * 0.875 * 0.875 * 1.24 / 1000.0);
+        return json{{"ok", true}, {"file", file}, {"remote", remote}, {"estimate", est}};
+    }, [this](json r) {
+        if (str(m_pjob, "stage") != "slicing") return;   // cancelled meanwhile
+        if (!r.value("ok", false)) { m_pjob["stage"] = "failed"; m_pjob["message"] = r.value("error", "Slicing failed"); }
+        else {
+            m_pjob["stage"] = "ready"; m_pjob["file"] = r["file"]; m_pjob["remote"] = r["remote"]; m_pjob["estimate"] = r["estimate"];
+            m_pjob["message"] = "Sliced. Check the printer has PLA loaded and a clean plate, then start the print.";
+        }
+        publishState();
+    });
+}
+
+std::string SwampCoreImpl::startPrint(std::string confirm) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (str(m_pjob, "stage") != "ready") return fail("Nothing is ready to print");
+    if (unquote(confirm) != "yes") return fail("Confirm to start the print");
+    bambu::Printer p = printerConf();
+    std::string file = str(m_pjob, "file"), remote = str(m_pjob, "remote"), title = str(m_pjob, "title");
+    m_pjob["stage"] = "uploading"; m_pjob["message"] = "Sending the file to the printer..."; m_pjob["progress"] = 0;
+    publishState();
+    auto life = m_life;
+    runAsync([this, life, p, file, remote, title] {
+        std::string err;
+        long long lastPost = 0;
+        bool up = bambu::upload(p, file, remote, err, [&](long long s, long long t) {
+            long long now = bambu::msNow();
+            if (now - lastPost < 500 || t <= 0) return;
+            lastPost = now;
+            int pct = (int)(s * 100 / t);
+            if (*life) onLoop([this, life, pct] { if (!*life) return; std::lock_guard<std::recursive_mutex> lk(m_mtx); if (str(m_pjob, "stage") == "uploading") m_pjob["progress"] = pct; });
+        });
+        if (!up) return json{{"ok", false}, {"error", err}};
+        if (*life) onLoop([this, life] { if (!*life) return; std::lock_guard<std::recursive_mutex> lk(m_mtx); m_pjob["stage"] = "starting"; m_pjob["message"] = "Starting the print..."; publishState(); });
+        if (!bambu::startPrint(p, remote, title, false, err)) return json{{"ok", false}, {"error", err}};
+        return json{{"ok", true}};
+    }, [this](json r) {
+        if (!r.value("ok", false)) { m_pjob["stage"] = "failed"; m_pjob["message"] = r.value("error", "Printing failed"); }
+        else { m_pjob["stage"] = "sent"; m_pjob["message"] = "The printer accepted the job."; m_printsSent++; m_printerStateAt = 0; refreshPrinterState(); }
+        publishState();
+    });
+    return ok(json{{"job", m_pjob}});
+}
+
+std::string SwampCoreImpl::cancelPrint() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    std::string st = str(m_pjob, "stage");
+    if (st == "uploading" || st == "starting") return fail("The file is already on its way to the printer - stop it on the printer if needed");
+    m_pjob = nullptr;
+    publishState();
+    return ok();
 }
 
 // ---- creators -------------------------------------------------------------------------------

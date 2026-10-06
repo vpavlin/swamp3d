@@ -26,5 +26,5 @@ logos_module(
         src/logos_sync/signing.hpp
     INCLUDE_DIRS src
     FIND_PACKAGES OpenSSL
-    LINK_LIBRARIES OpenSSL::Crypto
+    LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto
 )

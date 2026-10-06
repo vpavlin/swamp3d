@@ -37,6 +37,7 @@ Item {
     property string tagFilter: ""
     property string catFilter: ""
     property string modelNote: ""
+    readonly property bool printBusy: !!root.st.printJob && ["downloading", "slicing", "uploading", "starting"].indexOf(root.st.printJob.stage) >= 0
     property var globalRes: []
     property var globalInfo: null
     property bool globalPending: false
@@ -401,6 +402,12 @@ Item {
                                         text: root.st.slicer ? "Open in " + root.st.slicer.name.replace(" (Flatpak)", "").replace(" (AppImage)", "") : "Open in slicer"
                                         ToolTip.visible: hovered; ToolTip.text: root.st.slicer ? "Downloads and verifies the files if needed, then opens them in " + root.st.slicer.name : "Install OrcaSlicer, Bambu Studio or PrusaSlicer to open models in it from here"
                                         onClicked: root.act("openInSlicer", [root.model.modelId, String(root.ver().v)], "Opening in " + (root.st.slicer ? root.st.slicer.name : "your slicer") + "...") }
+                                    LogosButton { Layout.preferredWidth: 150
+                                        visible: !!root.st.printer
+                                        enabled: !!root.st.printer && root.st.printer.supported && !root.printBusy
+                                        text: root.st.printer ? "Print on " + root.st.printer.name.replace("Bambu Lab ", "") : "Print"
+                                        ToolTip.visible: hovered; ToolTip.text: "Slices with the printer's default profile (0.20 mm, PLA) and sends it over your LAN after you confirm"
+                                        onClicked: root.act("preparePrint", [root.model.modelId, String(root.ver().v)], "") }
                                     LogosButton { Layout.preferredWidth: 110; text: root.model && root.model.likedByMe ? "Unlike (" + root.model.likes + ")" : "Like (" + (root.model ? root.model.likes : 0) + ")"
                                         onClicked: root.act("like", [root.model.modelId, root.model.likedByMe ? "false" : "true"], "") }
                                     LogosButton { Layout.preferredWidth: 100; text: "Remix"; onClicked: root.startRemix() }
@@ -409,6 +416,21 @@ Item {
                                 }
                                 T3 { Layout.fillWidth: true; visible: !!(root.ver() && root.ver().download && root.ver().download.error); color: root.cErr; text: root.ver() && root.ver().download ? (root.ver().download.error || "") : "" }
                             }
+                        }
+                    }
+                    Card {
+                        visible: !!root.model && !!root.st.printJob && root.st.printJob.modelId === root.model.modelId
+                        T1 { text: "Print on " + (root.st.printJob ? root.st.printJob.printer : "") }
+                        T2 { Layout.fillWidth: true; text: root.st.printJob ? root.st.printJob.message : ""
+                             color: root.st.printJob && root.st.printJob.stage === "failed" ? root.cErr : (root.st.printJob && root.st.printJob.stage === "sent" ? root.cOk : root.cText2) }
+                        T2 { Layout.fillWidth: true; visible: !!root.st.printJob && !!root.st.printJob.estimate
+                             text: root.st.printJob && root.st.printJob.estimate ? "About " + root.st.printJob.estimate.time + "  ·  " + (root.st.printJob.estimate.filamentG || "?") + " g of PLA (" + (root.st.printJob.estimate.filamentM || "?") + " m)  ·  " + (root.st.printJob.estimate.layers || "?") + " layers  ·  " + root.st.printJob.profile : "" }
+                        ProgressBar { Layout.fillWidth: true; visible: !!root.st.printJob && root.st.printJob.stage === "uploading"; from: 0; to: 100; value: root.st.printJob ? (root.st.printJob.progress || 0) : 0 }
+                        RowLayout { spacing: root.spS
+                            LogosButton { visible: !!root.st.printJob && root.st.printJob.stage === "ready"; text: "Start print"; onClicked: printConfirm.open() }
+                            LogosButton { visible: !!root.st.printJob && ["ready", "failed", "sent", "downloading", "slicing"].indexOf(root.st.printJob.stage) >= 0
+                                text: root.st.printJob && (root.st.printJob.stage === "sent" || root.st.printJob.stage === "failed") ? "Close" : "Cancel"
+                                onClicked: root.act("cancelPrint", [], "") }
                         }
                     }
                     Card {
@@ -577,6 +599,35 @@ Item {
                             LogosButton { text: "Only mine"; onClicked: root.act("setCategories", [JSON.stringify([])], "") } }
                     }
                     Card {
+                        T1 { text: "Printer" }
+                        T2 { Layout.fillWidth: true
+                             text: "Print straight from Swamp to a Bambu Lab A1 or A1 mini on your network - no cloud, no account. The printer has to be in LAN-only mode with Developer Mode on (printer screen: Settings > Network/LAN; then restart it). That switches off Bambu's cloud printing while it's on." }
+                        T2 { Layout.fillWidth: true; visible: !!root.st.printer; color: root.cText
+                             text: root.st.printer ? root.st.printer.name + "  ·  " + root.st.printer.ip + "  ·  " + root.st.printer.serial + (root.st.printer.supported ? "" : "  ·  not supported yet") : "" }
+                        T3 { Layout.fillWidth: true; visible: !!root.st.printer
+                             text: !root.st.printer ? "" : root.st.printer.state ? ("Status: " + root.st.printer.state.state + (root.st.printer.state.state === "RUNNING" ? "  ·  " + root.st.printer.state.percent + "%  ·  " + root.st.printer.state.remainingMin + " min left" : "") +
+                                   "  ·  nozzle " + Math.round(root.st.printer.state.nozzle) + "°C  ·  bed " + Math.round(root.st.printer.state.bed) + "°C" + (root.st.printer.state.job ? "  ·  " + root.st.printer.state.job : ""))
+                                   : (root.st.printer.stateError ? "Can't reach it: " + root.st.printer.stateError : "Checking...")
+                             color: !!root.st.printer && !!root.st.printer.stateError ? root.cErr : root.cText3 }
+                        RowLayout { spacing: root.spS
+                            LogosButton { text: root.st.discovering ? "Looking..." : "Find printers"; enabled: !root.st.discovering; onClicked: root.act("findPrinters", [], "") }
+                            LogosButton { visible: !!root.st.printer; text: "Check status"; onClicked: root.core("printerStatus", [], function () { root.refresh() }) }
+                        }
+                        Repeater { model: root.st.discovered || []
+                            delegate: RowLayout { spacing: root.spS
+                                T2 { text: (modelData.name || "Bambu Lab printer") + "  ·  " + modelData.ip + "  ·  " + modelData.serial }
+                                Text { textFormat: Text.PlainText; text: "use this one"; color: root.cPrimary; font.pixelSize: 12; font.underline: true
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { pIp.text = modelData.ip; pSerial.text = modelData.serial; pModel.text = modelData.model; pName.text = modelData.name || "" } } } } }
+                        GridLayout { columns: 4; columnSpacing: root.spS; rowSpacing: root.spS; Layout.fillWidth: true
+                            Field { id: pIp; placeholderText: "IP address"; text: root.st.printer ? root.st.printer.ip : "" }
+                            Field { id: pSerial; placeholderText: "serial number"; text: root.st.printer ? root.st.printer.serial : "" }
+                            Field { id: pModel; placeholderText: "model: A1 or A1 mini"; text: root.st.printer ? root.st.printer.model : "" }
+                            Field { id: pName; placeholderText: "name (optional)" }
+                            Field { id: pCode; placeholderText: root.st.printer && root.st.printer.hasAccessCode ? "access code (saved)" : "access code (on the printer's screen)"; echoMode: TextInput.Password }
+                            LogosButton { text: "Save printer"; onClicked: root.act("setPrinter", [JSON.stringify({ ip: pIp.text, serial: pSerial.text, model: pModel.text, name: pName.text, accessCode: pCode.text })], "Printer saved", function () { pCode.text = "" }) }
+                        }
+                    }
+                    Card {
                         T1 { text: "Search indexes" }
                         T2 { Layout.fillWidth: true; text: root.st.index ? root.plural(root.st.index.known || 0, "index", "indexes") + " known. Your node checks that each one includes your own models; one that leaves something out without saying so loses your trust." : "" }
                         Repeater { model: root.st.index ? root.st.index.omissions : []
@@ -620,6 +671,21 @@ Item {
         }
 
 
+    Dialog {
+        id: printConfirm
+        modal: true; anchors.centerIn: parent; width: 520; padding: root.sp
+        background: Rectangle { color: root.cCard; radius: root.rad + 4; border.color: root.cLine }
+        header: T1 { text: "Start the print?"; padding: root.sp; bottomPadding: 0 }
+        ColumnLayout { anchors.fill: parent; spacing: root.spS
+            T2 { Layout.fillWidth: true; text: "The printer starts heating and printing right away. Check that PLA is loaded, the plate is clean and nothing is on the bed." +
+                 (root.st.printJob && root.st.printJob.estimate ? "\n\nAbout " + root.st.printJob.estimate.time + ", " + (root.st.printJob.estimate.filamentG || "?") + " g of PLA." : "") } }
+        footer: RowLayout { spacing: root.spS
+            Item { Layout.fillWidth: true }
+            LogosButton { text: "Not yet"; onClicked: printConfirm.reject() }
+            LogosButton { text: "Print it"; onClicked: printConfirm.accept() }
+            Item { width: root.sp } }
+        onAccepted: root.act("startPrint", ["yes"], "Sending to the printer...")
+    }
     Dialog {
         id: retractDlg
         title: "Retract this model?"

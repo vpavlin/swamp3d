@@ -18,3 +18,4 @@
 | 0014 | [Subscribe to categories; nobody mirrors the whole catalogue](0014-category-topics.md) |
 | 0015 | [Global search uses sharded, signed index snapshots in Logos Storage](0015-sharded-index-snapshots.md) |
 | 0016 | [Optional anonymous query hubs, kept honest by redundancy, audits and declared exclusions](0016-anonymous-query-hubs.md) |
+| 0017 | [Print to Bambu Lab printers over the LAN; slice locally with the printer's default profile](0017-lan-printing.md) |

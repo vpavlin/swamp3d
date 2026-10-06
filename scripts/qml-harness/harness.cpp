@@ -45,6 +45,12 @@ public:
         if (m == "setCategories") return core->setCategories(s(0));
         if (m == "globalSearch") return core->globalSearch(s(0));
         if (m == "openInSlicer") return core->openInSlicer(s(0), s(1));
+        if (m == "findPrinters") return core->findPrinters();
+        if (m == "setPrinter") return core->setPrinter(s(0));
+        if (m == "printerStatus") return core->printerStatus();
+        if (m == "preparePrint") return core->preparePrint(s(0), s(1));
+        if (m == "startPrint") return core->startPrint(s(0));
+        if (m == "cancelPrint") return core->cancelPrint();
         return "{\"error\":\"Invalid response\"}";
     }
     Q_INVOKABLE void callModuleAsync(const QString& mod, const QString& method, const QVariantList& args, const QJSValue& cb, int) {

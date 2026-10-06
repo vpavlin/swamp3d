@@ -20,6 +20,7 @@
 #include <atomic>
 #include "logos_module_context.h"
 #include "swamp_catalog.hpp"
+#include "swamp_bambu.hpp"
 
 class QTimer;
 
@@ -51,6 +52,17 @@ public:
     std::string globalSearch(std::string queryJson);
     // download (if needed) and open the version's model files in the installed desktop slicer
     std::string openInSlicer(std::string modelId, std::string version);
+
+    // printing on a Bambu Lab printer over the LAN (LAN-only + Developer Mode; no cloud)
+    // listen for printers on the LAN (~6 s; ask again for the result)
+    std::string findPrinters();
+    // {ip, serial, accessCode, model, name}; the access code is stored owner-only and never returned
+    std::string setPrinter(std::string printerJson);
+    std::string printerStatus();
+    // download (verified) + slice with the printer's default profile; then startPrint("yes")
+    std::string preparePrint(std::string modelId, std::string version);
+    std::string startPrint(std::string confirm);
+    std::string cancelPrint();
 
 protected:
     void onContextReady() override;
@@ -104,6 +116,17 @@ private:
     void refreshRecord(const std::string& modelId);
     void checkInclusion();
     swamp::json findSlicer();
+    void runAsync(std::function<swamp::json()> work, std::function<void(swamp::json)> done);
+    swamp::bambu::Printer printerConf();
+    swamp::json printerPublic();
+    void refreshPrinterState();
+    swamp::json orcaFor(const swamp::json& profiles, std::string& err);
+    void beginSlice(const DownloadJob& j);
+    swamp::json m_printer, m_printerState, m_pjob, m_discovered = swamp::json::array();
+    std::string m_printerStateErr;
+    long long m_printerStateAt = 0, m_discoveredAt = 0;
+    bool m_discovering = false, m_printerPolling = false;
+    long m_printsSent = 0;
     swamp::json detectSlicer();
     swamp::json m_slicer;
     long long m_slicerAt = 0;
