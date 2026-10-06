@@ -49,6 +49,8 @@ public:
     // search every category through the newest index snapshot (ADR 0015): {q, category, limit};
     // {pending:true} while the needed shards are being fetched - ask again
     std::string globalSearch(std::string queryJson);
+    // download (if needed) and open the version's model files in the installed desktop slicer
+    std::string openInSlicer(std::string modelId, std::string version);
 
 protected:
     void onContextReady() override;
@@ -101,6 +103,11 @@ private:
     bool fetchRecord(const std::string& modelId, bool& pending);
     void refreshRecord(const std::string& modelId);
     void checkInclusion();
+    swamp::json findSlicer();
+    swamp::json detectSlicer();
+    swamp::json m_slicer;
+    long long m_slicerAt = 0;
+    std::string launchSlicer(const DownloadJob& j);
     swamp::json omissionsJson();
     swamp::json excludedMineJson();
     std::vector<std::string> cidsFor(const std::string& sha);
@@ -151,7 +158,7 @@ private:
     std::set<std::string> m_subs, m_joined;
     std::map<std::string, long long> m_wantImg, m_extraImg, m_recordAt;
     std::map<std::string, std::vector<std::string>> m_extraCids;
-    std::set<std::string> m_privateFetch, m_indexShas;
+    std::set<std::string> m_privateFetch, m_indexShas, m_openAfter;
     std::map<std::string, swamp::json> m_shardCache;
     swamp::json m_indexPending;
     std::string m_indexRoot, m_testOmit;
@@ -160,7 +167,7 @@ private:
     long long m_lastInclusion = 0, m_inclusionEveryMs = 5LL * 60 * 1000, m_inclusionGraceMs = 10LL * 60 * 1000;
     std::map<std::string, swamp::json> m_omissions;
     std::map<std::string, std::string> m_excludedMine;
-    long m_indexesBuilt = 0, m_privacyDowngrades = 0;
+    long m_indexesBuilt = 0, m_privacyDowngrades = 0, m_slicerLaunches = 0;
     std::map<std::string, long long> m_announcedAt, m_answeredAt;
     QTimer* m_timer = nullptr;
     // one Storage request at a time: storage 3.x serves calls in turn and a download start can

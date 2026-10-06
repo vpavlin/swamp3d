@@ -6,6 +6,9 @@
 #define SWAMP_THUMB_QT 1   // the module links Qt Core: compress thumbnails with qCompress
 #include "swamp_thumb.hpp"
 #include <QTimer>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QDir>
 #include <QObject>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -21,7 +24,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.4.0";
+static const char* SWAMP_VERSION = "0.4.1";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -892,11 +895,109 @@ void SwampCoreImpl::advanceJobs() {
                 }
                 j.status = err.empty() ? "done" : "failed";
                 j.error = err.empty() ? "" : "Couldn't write to " + j.dir + " (" + err + ")";
+                if (err.empty() && m_openAfter.erase(key)) { std::string why = launchSlicer(j); if (!why.empty()) j.error = why; }
             } else j.status = "fetching";
         }
         if (j.status != prevStatus || j.error != prevError) changed = true;
     }
     if (changed) { saveJobs(); publishState(); }
+}
+
+// ---- hand-off to a desktop slicer --------------------------------------------------------------
+// Swamp doesn't slice (yet): it hands the verified model files to the slicer you already use, and
+// you print from there - with your printer set up however it is (Bambu cloud, LAN, PrusaLink...).
+// Only model files are passed, never anything else from a download.
+static bool isMeshFile(const std::string& name) {
+    std::string e = lowerExt(name);
+    return e == "stl" || e == "3mf" || e == "obj" || e == "step" || e == "stp" || e == "amf";
+}
+
+// Which slicer to open, best first: SWAMP_SLICER, then installed binaries, Flatpaks, AppImages in
+// the usual folders. {name, program, leading args}.
+json SwampCoreImpl::findSlicer() {
+    long long now = nowMs();
+    const char* forced = getenv("SWAMP_SLICER");
+    if (!(forced && *forced) && m_slicerAt && now - m_slicerAt < 30000) return m_slicer;   // snapshot() is polled: don't rescan every time
+    m_slicerAt = now;
+    m_slicer = detectSlicer();
+    return m_slicer;
+}
+json SwampCoreImpl::detectSlicer() {
+    if (const char* env = getenv("SWAMP_SLICER")) if (*env) return json{{"name", fs::path(env).filename().string()}, {"program", env}, {"args", json::array()}};
+    const std::vector<std::pair<std::string, std::vector<std::string>>> bins = {
+        {"OrcaSlicer", {"orca-slicer", "OrcaSlicer", "orcaslicer"}},
+        {"Bambu Studio", {"bambu-studio", "BambuStudio", "bambustudio"}},
+        {"PrusaSlicer", {"prusa-slicer", "PrusaSlicer", "prusaslicer"}},
+        {"SuperSlicer", {"superslicer", "SuperSlicer"}}};
+    for (const auto& [name, cands] : bins)
+        for (const auto& c : cands) {
+            QString p = QStandardPaths::findExecutable(QString::fromStdString(c));
+            if (!p.isEmpty()) return json{{"name", name}, {"program", p.toStdString()}, {"args", json::array()}};
+        }
+    QString flatpak = QStandardPaths::findExecutable("flatpak");
+    if (!flatpak.isEmpty()) {
+        const std::vector<std::pair<std::string, std::string>> apps = {
+            {"OrcaSlicer", "io.github.softfever.OrcaSlicer"}, {"Bambu Studio", "com.bambulab.BambuStudio"}, {"PrusaSlicer", "com.prusa3d.PrusaSlicer"}};
+        for (const auto& [name, id] : apps)
+            for (const std::string& dir : {std::string("/var/lib/flatpak/app/") + id, homeDir() + "/.local/share/flatpak/app/" + id}) {
+                std::error_code ec;
+                if (fs::exists(dir, ec)) return json{{"name", name + " (Flatpak)"}, {"program", flatpak.toStdString()}, {"args", {"run", id}}};
+            }
+    }
+    const std::vector<std::pair<std::string, std::string>> images = {{"OrcaSlicer", "orca"}, {"Bambu Studio", "bambu"}, {"PrusaSlicer", "prusaslicer"}};
+    for (const auto& [name, needle] : images)
+        for (const char* sub : {"/Applications", "/Downloads", "/bin", "/opt", "/.local/bin"}) {
+            std::error_code ec;
+            std::string dir = homeDir() + sub;
+            if (!fs::is_directory(dir, ec)) continue;
+            for (const auto& de : fs::directory_iterator(dir, ec)) {
+                std::string fn = de.path().filename().string(), low = fn;
+                for (auto& c : low) c = (char)std::tolower((unsigned char)c);
+                if (low.find(needle) != std::string::npos && low.size() > 9 && low.compare(low.size() - 9, 9, ".appimage") == 0)
+                    return json{{"name", name + " (AppImage)"}, {"program", de.path().string()}, {"args", json::array()}};
+            }
+        }
+    return nullptr;
+}
+
+std::string SwampCoreImpl::launchSlicer(const DownloadJob& j) {
+    json sl = findSlicer();
+    if (sl.is_null()) return "No slicer found - install OrcaSlicer, Bambu Studio or PrusaSlicer, or set SWAMP_SLICER";
+    QStringList args;
+    for (const auto& a : sl["args"]) args << QString::fromStdString(a.get<std::string>());
+    int n = 0;
+    for (const auto& [sha, name] : j.files) if (isMeshFile(name)) { args << QString::fromStdString(j.dir + "/" + name); n++; }
+    if (n == 0) return "This version has no model files a slicer can open";
+    qint64 pid = 0;
+    bool started = QProcess::startDetached(QString::fromStdString(sl["program"].get<std::string>()), args, QString::fromStdString(j.dir), &pid);
+    fprintf(stderr, "[swamp] slicer: %s %s (%d files) -> %s\n", str(sl, "name").c_str(), str(sl, "program").c_str(), n, started ? "started" : "FAILED");
+    if (!started) return "Couldn't start " + str(sl, "name");
+    m_slicerLaunches++;
+    return "";
+}
+
+// One click: download if needed (verified), then open in the slicer.
+std::string SwampCoreImpl::openInSlicer(std::string modelId, std::string version) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
+    modelId = unquote(modelId);
+    if (findSlicer().is_null()) return fail("No slicer found - install OrcaSlicer, Bambu Studio or PrusaSlicer, or set SWAMP_SLICER");
+    auto it = m_cat.models.find(modelId);
+    if (it == m_cat.models.end() || it->second.versions.empty()) return fail("No such model");
+    int v = atoi(unquote(version).c_str());
+    if (v <= 0) v = (int)it->second.versions.size();
+    std::string key = modelId + "@" + std::to_string(v);
+    auto jt = m_jobs.find(key);
+    if (jt != m_jobs.end() && jt->second.status == "done") {
+        std::string why = launchSlicer(jt->second);
+        if (!why.empty()) return fail(why);
+        return ok(json{{"opened", true}});
+    }
+    m_openAfter.insert(key);
+    std::string r = download(modelId, std::to_string(v));
+    json rj = json::parse(r, nullptr, false);
+    if (!rj.is_object() || !rj.value("ok", false)) { m_openAfter.erase(key); return r; }
+    return ok(json{{"opened", false}, {"downloading", true}});
 }
 
 // Thumbnails and photos are small: fetch them eagerly so listings have pictures.
@@ -1017,6 +1118,7 @@ std::string SwampCoreImpl::snapshot() {
     return json{{"ok", true}, {"version", SWAMP_VERSION}, {"status", m_status}, {"hub", m_hub},
                 {"me", {{"address", m_id.address}, {"profile", profile}}},
                 {"categories", categoriesJson()},
+                {"slicer", findSlicer()},
                 {"index", {{"indexer", m_indexer}, {"built", m_indexesBuilt}, {"known", m_cat.indexes.size()}, {"privacyDowngrades", m_privacyDowngrades},
                            {"omissions", omissionsJson()}, {"excludedMine", excludedMineJson()}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},

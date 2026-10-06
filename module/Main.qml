@@ -395,6 +395,12 @@ Item {
                                         onClicked: root.act("download", [root.model.modelId, String(root.ver().v)], "Downloading into your Swamp folder") }
                                     LogosButton { Layout.preferredWidth: 110; enabled: !!(root.ver() && root.ver().download && root.ver().download.status === "done"); text: "Open folder"
                                         onClicked: Qt.openUrlExternally(root.fileUrl(root.ver().download.dir)) }
+                                    // hand the verified model files to the slicer you already use; print from there
+                                    LogosButton { Layout.preferredWidth: 170
+                                        enabled: !!root.st.slicer
+                                        text: root.st.slicer ? "Open in " + root.st.slicer.name.replace(" (Flatpak)", "").replace(" (AppImage)", "") : "Open in slicer"
+                                        ToolTip.visible: hovered; ToolTip.text: root.st.slicer ? "Downloads and verifies the files if needed, then opens them in " + root.st.slicer.name : "Install OrcaSlicer, Bambu Studio or PrusaSlicer to open models in it from here"
+                                        onClicked: root.act("openInSlicer", [root.model.modelId, String(root.ver().v)], "Opening in " + (root.st.slicer ? root.st.slicer.name : "your slicer") + "...") }
                                     LogosButton { Layout.preferredWidth: 110; text: root.model && root.model.likedByMe ? "Unlike (" + root.model.likes + ")" : "Like (" + (root.model ? root.model.likes : 0) + ")"
                                         onClicked: root.act("like", [root.model.modelId, root.model.likedByMe ? "false" : "true"], "") }
                                     LogosButton { Layout.preferredWidth: 100; text: "Remix"; onClicked: root.startRemix() }

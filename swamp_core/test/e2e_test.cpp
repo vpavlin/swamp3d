@@ -167,6 +167,22 @@ int main(int argc, char** argv) {
               "carol gets v2 once an honest holder is back");
     }
 
+    // hand-off to a desktop slicer: one click downloads (verified) and opens the model files only
+    {
+        std::string fake = root + "/fake-slicer.sh", log = root + "/slicer-args.txt";
+        { std::ofstream f(fake); f << "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > " << log << "\n"; }
+        fs::permissions(fake, fs::perms::owner_all);
+        setenv("SWAMP_SLICER", fake.c_str(), 1);
+        json sn = bob->snap();
+        CHECK(sn["slicer"].is_object() && sn["slicer"]["program"] == fake, "the slicer is detected (SWAMP_SLICER)");
+        json r = json::parse(bob->core.openInSlicer(mid, "1"));
+        CHECK(r.value("ok", false), "openInSlicer accepts (downloads first if needed)");
+        CHECK(waitFor([&] { return fs::exists(log) && fs::file_size(log) > 0; }, 15000), "the slicer is started once the files are verified");
+        std::ifstream lf(log); std::string line, all; while (std::getline(lf, line)) all += line + "\n";
+        CHECK(all.find("74890.stl") != std::string::npos, "it gets the downloaded model file");
+        unsetenv("SWAMP_SLICER");
+    }
+
     // malformed and hostile frames: dropped and counted, the node keeps working (review C2)
     {
         long badBefore = bob->snap()["counters"]["rxBad"].get<long>();
