@@ -72,6 +72,7 @@ logos_events:
 
 private:
     struct PendingUpload { std::string sha; long long since = 0; };
+    struct TopicHealth { long tx = 0; long long firstTx = 0, lastRx = 0; };
     // One entry per blob being fetched: which candidate CID we're on, retries, and the transfer.
     struct Fetch { size_t cidIdx = 0; int rounds = 0; long long nextTry = 0, since = 0, size = 0, seenSize = 0, grewAt = 0; bool inflight = false, gaveUp = false; std::string cid, session, error; };
     struct DownloadJob { std::string modelId; int v = 0; std::string dir; std::vector<std::pair<std::string, std::string>> files; std::string status, error; };
@@ -111,6 +112,7 @@ private:
     void loadSettings();
     void indexTick();
     swamp::json bestManifest();
+    std::string globalSearchImpl(const std::string& queryJson);
     swamp::json shard(const swamp::json& manifest, const std::string& key);
     bool fetchRecord(const std::string& modelId, bool& pending);
     void refreshRecord(const std::string& modelId);
@@ -120,6 +122,7 @@ private:
     swamp::bambu::Printer printerConf();
     swamp::json printerPublic();
     void refreshPrinterState();
+    void pinPrinterCert(const char* field, const std::string& pin);
     swamp::json orcaFor(const swamp::json& profiles, std::string& err);
     void beginSlice(const DownloadJob& j);
     swamp::json m_printer, m_printerState, m_pjob, m_discovered = swamp::json::array();
@@ -128,10 +131,14 @@ private:
     bool m_discovering = false, m_printerPolling = false;
     long m_printsSent = 0;
     swamp::json detectSlicer();
+    std::vector<swamp::json> detectSlicers(bool bambuOnly);
+    std::vector<swamp::json> m_bambuSlicers;
     swamp::json m_slicer;
     long long m_slicerAt = 0;
     std::string launchSlicer(const DownloadJob& j);
     swamp::json omissionsJson();
+    swamp::json transportHealth();
+    std::map<std::string, TopicHealth> m_topicHealth;
     swamp::json suspectsJson();
     swamp::json excludedMineJson();
     std::vector<std::string> cidsFor(const std::string& sha);
@@ -192,7 +199,7 @@ private:
     std::map<std::string, swamp::json> m_omissions, m_suspects;
     long long m_omissionConfirmMs = 10LL * 60 * 1000;
     std::map<std::string, std::string> m_excludedMine;
-    long m_indexesBuilt = 0, m_privacyDowngrades = 0, m_slicerLaunches = 0;
+    long m_indexesBuilt = 0, m_privacyDowngrades = 0, m_slicerLaunches = 0, m_badShards = 0;
     std::map<std::string, long long> m_announcedAt, m_answeredAt;
     QTimer* m_timer = nullptr;
     // one Storage request at a time: storage 3.x serves calls in turn and a download start can

@@ -516,7 +516,7 @@ Item {
                         Field { id: pTags; placeholderText: "comma separated, e.g. tool, organizer, gridfinity" }
                         T3 { text: "Category" }
                         ComboBox { id: pCategory; Layout.fillWidth: true; enabled: !root.draftFor
-                            model: (root.st.categories || []).map(function (c) { return c.label })
+                            model: (root.st.categories || []).map(function (c) { return c.label.replace(/&/g, "&&") })   // a lone & is a keyboard-mnemonic marker
                             ToolTip.visible: hovered && !enabled; ToolTip.text: "A model keeps the category it was created in" }
                         T3 { text: "Licence" }
                         ComboBox { id: pLicence; model: root.licences; Layout.fillWidth: true }
@@ -577,7 +577,7 @@ Item {
                     }
                     Card {
                         T1 { text: "Categories you follow" }
-                        T2 { Layout.fillWidth: true; text: "Your node keeps a full copy of these categories: browsing and searching them works offline and nobody learns what you look at. Categories you publish in stay on, so replies to your models reach you." }
+                        T2 { Layout.fillWidth: true; text: "Your node keeps a full copy of these categories: browsing and searching them works offline and nobody learns what you look at. Each one costs disk space and bandwidth as it grows - unfollow what you don't need; search still finds everything else. Categories you publish in stay on, so replies to your models reach you." }
                         Flow { Layout.fillWidth: true; spacing: 6
                             Repeater { model: root.st.categories || []
                                 delegate: Rectangle {
@@ -601,7 +601,7 @@ Item {
                     Card {
                         T1 { text: "Printer" }
                         T2 { Layout.fillWidth: true
-                             text: "Print straight from Swamp to a Bambu Lab A1 or A1 mini on your network - no cloud, no account. The printer has to be in LAN-only mode with Developer Mode on (printer screen: Settings > Network/LAN; then restart it). That switches off Bambu's cloud printing while it's on." }
+                             text: "Print straight from Swamp to a Bambu Lab A1 or A1 mini on your network - no cloud, no account. The printer has to be in LAN-only mode with Developer Mode on (printer screen: Settings > Network/LAN; then restart it). That switches off Bambu's cloud printing while it's on. Needs OrcaSlicer 2.4+ or Bambu Studio. Only pick a printer you recognise: Swamp remembers its certificate on first contact and refuses an impostor later, but it can't tell which device is yours the first time." }
                         T2 { Layout.fillWidth: true; visible: !!root.st.printer; color: root.cText
                              text: root.st.printer ? root.st.printer.name + "  ·  " + root.st.printer.ip + "  ·  " + root.st.printer.serial + (root.st.printer.supported ? "" : "  ·  not supported yet") : "" }
                         T3 { Layout.fillWidth: true; visible: !!root.st.printer
@@ -644,6 +644,8 @@ Item {
                     Card {
                         T1 { text: "This node" }
                         T2 { Layout.fillWidth: true; text: (root.st.status || "?") + (root.st.hub ? "  ·  running as a pinning hub" : "") }
+                        T2 { Layout.fillWidth: true; color: root.cWarn; visible: !!root.st.transport && !root.st.transport.ok
+                             text: root.st.transport ? "Posted on these topics for 10+ minutes without hearing anything back: " + root.st.transport.silentTopics.join(", ") + ". Either nobody else follows them yet, or the network isn't carrying them - what you publish there may not be reaching anyone." : "" }
                         T3 { Layout.fillWidth: true; text: root.st.catalog ? (root.st.catalog.models + " models, " + root.st.catalog.events + " catalogue events, " + root.st.catalog.cids + " known files") : "" }
                         T3 { Layout.fillWidth: true; text: root.st.counters ? ("since start: rx " + root.st.counters.rx + " / tx " + root.st.counters.tx + "  ·  uploaded " + root.st.counters.uploaded + "  ·  fetched " + root.st.counters.fetched + (root.st.counters.verifyFailed ? "  ·  rejected " + root.st.counters.verifyFailed + " bad files" : "")) : "" }
                         T3 { Layout.fillWidth: true; text: root.st.storage ? ("Storage: " + (root.st.storage.hostOwned ? "Basecamp's node" : "own node") + "  ·  downloads go to " + root.st.storage.downloads) : "" }
@@ -657,8 +659,10 @@ Item {
 
         T3 {
             Layout.fillWidth: true
-            color: root.st.status === "Connected" ? root.cOk : root.cWarn
-            text: (root.st.status || "Connecting to swamp_core...") + "   |   core " + (root.st.version || "?") + "   |   " + (root.st.catalog ? root.st.catalog.models + " models" : "")
+            readonly property bool silent: !!root.st.transport && !root.st.transport.ok
+            color: root.st.status === "Connected" && !silent ? root.cOk : root.cWarn
+            text: (silent ? "Connected, but nobody has answered on " + root.st.transport.silentTopics.length + " of your topics - your posts may not be reaching anyone" : (root.st.status || "Connecting to swamp_core...")) +
+                  "   |   core " + (root.st.version || "?") + "   |   " + (root.st.catalog ? root.plural(root.st.catalog.models, "model", "models") : "")
         }
     }
     Rectangle {

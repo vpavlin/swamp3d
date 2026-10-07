@@ -21,6 +21,7 @@
 #include <chrono>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netdb.h>
@@ -35,7 +36,10 @@ namespace bambu {
 
 using json = nlohmann::json;
 
-struct Printer { std::string ip, serial, accessCode, model, name; int mqttPort = 8883, ftpsPort = 990; };
+// certPin*: SHA-256 of the printer's TLS certificate per service, pinned on first use (TOFU): the
+// certificate can't be checked against a CA we ship, but a device that later presents a different
+// one - someone posing as the printer to collect the access code - is refused.
+struct Printer { std::string ip, serial, accessCode, model, name, certPinMqtt, certPinFtps; int mqttPort = 8883, ftpsPort = 990; };
 
 inline long long msNow() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
@@ -72,8 +76,20 @@ public:
         SSL_set_tlsext_host_name(ssl_, host.c_str());
         if (reuse) SSL_set_session(ssl_, reuse);   // FTPS data channel: the printer wants the control session reused
         if (SSL_connect(ssl_) != 1) { err = "TLS handshake with " + host + " failed"; return false; }
+        if (X509* cert = SSL_get1_peer_certificate(ssl_)) {
+            unsigned char md[32]; unsigned int n = 0;
+            if (X509_digest(cert, EVP_sha256(), md, &n) == 1) { static const char* X = "0123456789abcdef"; for (unsigned i = 0; i < n; i++) { pin_ += X[md[i] >> 4]; pin_ += X[md[i] & 15]; } }
+            X509_free(cert);
+        }
         return true;
     }
+    // TOFU check: empty `expected` = first contact (the caller stores pin())
+    bool pinOk(const std::string& expected, std::string& err) const {
+        if (expected.empty() || expected == pin_) return true;
+        err = "The printer's certificate changed since you set it up - is this really your printer? (Set it up again if you replaced or reset it.)";
+        return false;
+    }
+    const std::string& pin() const { return pin_; }
     bool write(const std::string& s) {
         size_t off = 0;
         while (off < s.size()) { int n = SSL_write(ssl_, s.data() + off, (int)(s.size() - off)); if (n <= 0) return false; off += n; }
@@ -106,6 +122,7 @@ private:
     int fd_ = -1;
     SSL_CTX* ctx_ = nullptr;
     SSL* ssl_ = nullptr;
+    std::string pin_;
 };
 
 // ---- FTPS (implicit TLS) ---------------------------------------------------------------------
@@ -123,12 +140,14 @@ inline int ftpReply(Tls& t, std::string& text) {
 }
 
 inline bool upload(const Printer& p, const std::string& localPath, const std::string& remoteName, std::string& err,
-                   std::function<void(long long, long long)> progress = nullptr) {
+                   std::function<void(long long, long long)> progress = nullptr, std::string* seenPin = nullptr) {
     std::ifstream f(localPath, std::ios::binary);
     if (!f) { err = "can't read " + localPath; return false; }
     f.seekg(0, std::ios::end); long long total = f.tellg(); f.seekg(0);
     Tls ctl;
     if (!ctl.open(p.ip, p.ftpsPort, 15000, err)) return false;
+    if (!ctl.pinOk(p.certPinFtps, err)) return false;   // before sending the access code
+    if (seenPin) *seenPin = ctl.pin();
     std::string txt;
     auto cmd = [&](const std::string& c, int want, const char* what) {
         if (!c.empty() && !ctl.write(c + "\r\n")) { err = std::string("FTPS: ") + what + ": connection lost"; return false; }
@@ -181,6 +200,7 @@ public:
     bool connect(const Printer& p, std::string& err) {
         p_ = p;
         if (!t_.open(p.ip, p.mqttPort, 15000, err)) return false;
+        if (!t_.pinOk(p.certPinMqtt, err)) return false;   // before sending the access code
         std::string vh = mqttStr("MQTT") + (char)4 + (char)0xC2 + (char)0 + (char)60;   // level 4; user+pass+clean; keepalive 60
         std::string pl = mqttStr("swamp-" + std::to_string(msNow() % 1000000)) + mqttStr("bblp") + mqttStr(p.accessCode);
         if (!t_.write(std::string(1, (char)0x10) + mqttLen(vh.size() + pl.size()) + vh + pl)) { err = "MQTT: connect failed"; return false; }
@@ -193,8 +213,9 @@ public:
         if (!readPacket(type, body) || type != 9) { err = "MQTT: subscribe not acknowledged (wrong serial number?)"; return false; }
         return true;
     }
-    bool publish(const json& msg, std::string& err) {
-        std::string topic = "device/" + p_.serial + "/request", payload = msg.dump();
+    bool publish(const json& msg, std::string& err) { return publishTo("device/" + p_.serial + "/request", msg, err); }
+    bool publishTo(const std::string& topic, const json& msg, std::string& err) {
+        std::string payload = msg.dump();
         std::string body = mqttStr(topic) + payload;   // qos 0: no packet id
         if (!t_.write(std::string(1, (char)0x30) + mqttLen(body.size()) + body)) { err = "MQTT: publish failed"; return false; }
         return true;
@@ -215,6 +236,7 @@ public:
         return false;
     }
     void close() { std::string d{(char)0xE0, 0}; t_.write(d); t_.shut(); }
+    const std::string& pin() const { return t_.pin(); }
 private:
     bool readPacket(int& type, std::string& body) {
         char h;
@@ -234,9 +256,10 @@ private:
 };
 
 // The printer's state: connect, ask for everything (pushall), return the "print" object.
-inline bool status(const Printer& p, json& out, std::string& err) {
+inline bool status(const Printer& p, json& out, std::string& err, std::string* seenPin = nullptr) {
     Mqtt m;
     if (!m.connect(p, err)) return false;
+    if (seenPin) *seenPin = m.pin();
     m.publish(json{{"pushing", {{"sequence_id", "0"}, {"command", "pushall"}, {"version", 1}, {"push_target", 1}}}}, err);
     json rep;
     bool ok = m.waitReport(10000, [](const json& j) { return j.contains("print") && j["print"].contains("gcode_state"); }, rep, err);
@@ -250,7 +273,10 @@ inline bool status(const Printer& p, json& out, std::string& err) {
 inline bool startPrint(const Printer& p, const std::string& remoteName, const std::string& title, bool useAms, std::string& err) {
     Mqtt m;
     if (!m.connect(p, err)) return false;
-    json cmd{{"print", {{"sequence_id", "0"}, {"command", "project_file"}, {"param", "Metadata/plate_1.gcode"},
+    // a sequence id of our own, so only the printer's answer to THIS command counts (review 2026-10-07:
+    // a printer already busy reports RUNNING, which must not read as "accepted")
+    std::string seq = std::to_string(100000 + msNow() % 900000000);
+    json cmd{{"print", {{"sequence_id", seq}, {"command", "project_file"}, {"param", "Metadata/plate_1.gcode"},
                         {"project_id", "0"}, {"profile_id", "0"}, {"task_id", "0"}, {"subtask_id", "0"},
                         {"subtask_name", title}, {"file", remoteName}, {"url", "file:///sdcard/" + remoteName}, {"md5", ""},
                         {"timelapse", false}, {"bed_type", "auto"}, {"bed_levelling", true}, {"flow_cali", false},
@@ -259,18 +285,20 @@ inline bool startPrint(const Printer& p, const std::string& remoteName, const st
     if (!m.publish(cmd, err)) { m.close(); return false; }
     // the printer echoes the command with a result, or moves to PREPARE/RUNNING
     json rep;
-    bool ok = m.waitReport(15000, [](const json& j) {
-        if (!j.contains("print")) return false;
+    bool ok = m.waitReport(15000, [&](const json& j) {
+        if (!j.contains("print") || !j["print"].is_object()) return false;
         const json& pr = j["print"];
-        if (pr.value("command", "") == "project_file" && pr.contains("result")) return true;
-        std::string st = pr.value("gcode_state", "");
-        return st == "PREPARE" || st == "RUNNING" || st == "SLICING";
+        auto s = [&](const char* k) { return pr.contains(k) && pr[k].is_string() ? pr[k].get<std::string>() : std::string(); };
+        if (s("command") == "project_file" && s("sequence_id") == seq && pr.contains("result")) return true;
+        std::string st = s("gcode_state");
+        return (st == "PREPARE" || st == "RUNNING" || st == "SLICING") && s("subtask_name") == title;   // our job, not someone else's
     }, rep, err);
     m.close();
     if (!ok) { err = "The printer didn't confirm the print (" + err + "). Is Developer Mode on?"; return false; }
     const json& pr = rep["print"];
-    if (pr.value("command", "") == "project_file" && pr.value("result", "") != "success" && pr.value("result", "") != "SUCCESS") {
-        err = "The printer refused the print: " + pr.value("result", "") + (pr.contains("reason") ? " (" + pr["reason"].dump() + ")" : "");
+    std::string res = pr.contains("result") && pr["result"].is_string() ? pr["result"].get<std::string>() : "";
+    if (pr.contains("command") && pr["command"] == "project_file" && res != "success" && res != "SUCCESS") {
+        err = "The printer refused the print: " + res + (pr.contains("reason") ? " (" + pr["reason"].dump() + ")" : "");
         return false;
     }
     return true;

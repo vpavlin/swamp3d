@@ -47,6 +47,23 @@ int main(int argc, char** argv) {
     err.clear();
     CHECK(!bambu::startPrint(p, "missing.gcode.3mf", "x", false, err) && err.find("refused") != std::string::npos, "a refused print is reported (" + err + ")");
 
+    // a printer busy with someone else's job must not read as "accepted" (review 2026-10-07)
+    auto setBusy = [&](bool busy) { bambu::Mqtt m; std::string e2; if (m.connect(p, e2)) { m.publishTo("device/" + p.serial + "/mock", json{{"busy", busy}}, e2); m.close(); } };
+    setBusy(true);
+    err.clear();
+    CHECK(!bambu::startPrint(p, "swamp-test.gcode.3mf", "My new job", false, err), "a busy printer's RUNNING report is not taken as accepting our job (" + err + ")");
+    setBusy(false);
+
+    err.clear();
+    std::string pin;
+    CHECK(bambu::status(p, st, err, &pin) && pin.size() == 64, "the printer's certificate fingerprint is captured");
+    bambu::Printer pinned = p; pinned.certPinMqtt = pin; pinned.certPinFtps = pin;
+    err.clear();
+    CHECK(bambu::status(pinned, st, err), "a matching pinned certificate is accepted");
+    bambu::Printer impostor = p; impostor.certPinMqtt = std::string(64, 'a');
+    err.clear();
+    CHECK(!bambu::status(impostor, st, err) && err.find("certificate changed") != std::string::npos, "a different certificate is refused before the access code is sent");
+
     std::cout << passes << " passed, " << fails << " failed\n";
     return fails ? 1 : 0;
 }

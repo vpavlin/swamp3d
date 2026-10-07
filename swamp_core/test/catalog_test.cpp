@@ -93,6 +93,13 @@ int main() {
     log.push_back(makeEvent(alice, "model.retract", {{"modelId", id}, {"reason", "superseded"}}, T++, eid()));
     CHECK(fold(log).models[id].retracted, "creator can retract");
 
+    // content topics must be ones Delivery accepts: 4 parts, or 5 with a numeric generation
+    bool allValid = validContentTopic(PEOPLE_TOPIC);
+    for (const auto& [cat, label] : categories()) allValid = allValid && validContentTopic(categoryTopic(cat));
+    CHECK(allValid, "people + every category topic is a valid content topic");
+    CHECK(!validContentTopic("/swamp/2/cat/tools/proto") && validContentTopic("/0/swamp/2/cat/proto")
+          && !validContentTopic("swamp/2/x/proto") && !validContentTopic("/swamp//x/proto"), "invalid topics refused");
+
     std::cout << passes << " passed, " << fails << " failed\n";
     return fails ? 1 : 0;
 }

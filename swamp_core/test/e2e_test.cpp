@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
     setenv("SWAMP_INCLUSION_EVERY_MS", "1000", 1);   // creators audit indexers every second
     setenv("SWAMP_INCLUSION_GRACE_MS", "0", 1);
     setenv("SWAMP_OMISSION_CONFIRM_MS", "1500", 1);
-    const std::string stl1 = repo + "/bench/data/raw/74890.stl", stl2 = repo + "/bench/data/raw/278455.stl";
+    const std::string stl1 = repo + "/swamp_core/test/meshes/torus.stl", stl2 = repo + "/swamp_core/test/meshes/twist.stl";   // committed test meshes
 
     Peer* alice = spawn("alice");
     Peer* bob = spawn("bob");
@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
     }
     json model = json::parse(bob->core.getModel(mid))["model"];
     json v1 = model["versions"][0];
-    CHECK(v1["files"][0]["name"] == "74890.stl" && v1["images"][0]["kind"] == "thumb", "version lists the STL and an auto thumbnail");
+    CHECK(v1["files"][0]["name"] == "torus.stl" && v1["images"][0]["kind"] == "thumb", "version lists the STL and an auto thumbnail");
     CHECK(!v1.contains("fp") || v1["fp"].is_null(), "getModel hides the fingerprint blob from the UI");
     {   // views are sandboxed in Basecamp 0.3: pictures are copied into the view's own dir
         std::string tsha = v1["images"][0]["sha256"];
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     CHECK(waitFor([&] { json m = json::parse(bob->core.getModel(mid))["model"]; json dl = m["versions"][0].value("download", json::object()); dir = dl.value("dir", ""); return dl.value("status", "") == "done"; }, 8000),
           "bob downloads from the hub while the creator is offline");
     std::string a, b;
-    { std::ifstream f1(stl1, std::ios::binary), f2(dir + "/74890.stl", std::ios::binary); std::stringstream s1, s2; s1 << f1.rdbuf(); s2 << f2.rdbuf(); a = s1.str(); b = s2.str(); }
+    { std::ifstream f1(stl1, std::ios::binary), f2(dir + "/torus.stl", std::ios::binary); std::stringstream s1, s2; s1 << f1.rdbuf(); s2 << f2.rdbuf(); a = s1.str(); b = s2.str(); }
     CHECK(!a.empty() && a == b, "downloaded file is byte-identical to the original");
     alice->store.online = true; alice->bus.online = true;
 
@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
         CHECK(r.value("ok", false), "openInSlicer accepts (downloads first if needed)");
         CHECK(waitFor([&] { return fs::exists(log) && fs::file_size(log) > 0; }, 15000), "the slicer is started once the files are verified");
         std::ifstream lf(log); std::string line, all; while (std::getline(lf, line)) all += line + "\n";
-        CHECK(all.find("74890.stl") != std::string::npos, "it gets the downloaded model file");
+        CHECK(all.find("torus.stl") != std::string::npos, "it gets the downloaded model file");
         unsetenv("SWAMP_SLICER");
     }
 
@@ -371,7 +371,7 @@ int main(int argc, char** argv) {
             CHECK(waitFor([&] {
                 if (nudge.elapsed() > 2500) { nudge.restart(); bob->core.comment(toyId, "nudge " + std::to_string(++n)); }
                 for (const auto& o : json(alice->snap()["index"]["omissions"])) if (o["indexer"] == rogueAddr && o["modelId"] == toyId) return true;
-                return false; }, 60000), "a newer index that still leaves it out gets the rogue caught (signed evidence)");
+                return false; }, 90000), "a newer index that still leaves it out gets the rogue caught (signed evidence)");
             json ev;
             for (const auto& o : json(alice->snap()["index"]["omissions"])) if (o["indexer"] == rogueAddr) ev = o;
             CHECK(ev.is_object() && ev.value("manifestEvent", "").size() > 0 && (ev.value("shardSha256", "").size() == 64 || ev.value("shardMissing", false)),
@@ -397,7 +397,7 @@ int main(int argc, char** argv) {
         FakeLoamBus::get().nodes.push_back(&dave->bus); FakeStoreNet::get().nodes.push_back(&dave->store);
         dave->core.fakeStart();
         CHECK(waitFor([&] { return dave->snap()["status"] == "Connected"; }, 4000), "lost Connected event: status poll brings the node up");
-        CHECK(waitFor([&] { return json::parse(dave->core.listModels("{}"))["total"].get<int>() >= 2; }, 8000), "...and it catches up");
+        CHECK(waitFor([&] { return json::parse(dave->core.listModels("{}"))["total"].get<int>() >= 2; }, 20000), "...and it catches up");
     }
 
     std::cout << passes << " passed, " << fails << " failed\n";

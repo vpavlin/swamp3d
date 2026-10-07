@@ -27,7 +27,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.1";
+static const char* SWAMP_VERSION = "0.5.2";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -53,6 +53,8 @@ static constexpr int kHubConcurrency = 3;
 static constexpr long long kImageMaxBytes = 16 * 1024 * 1024;
 static constexpr size_t kImageCacheFiles = 300;
 static constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
+static constexpr long long kManifestMaxAgeMs = 30LL * 24 * 3600 * 1000;   // an index older than this isn't used
+static constexpr long long kSilentTopicMs = 10LL * 60 * 1000;   // posting with no answer this long = "may not reach anyone"
 static constexpr long long kRecordRefreshMs = 60000;   // refresh a model held only through the index
 static constexpr int kPrivateRounds = 2;            // failed private (Mix) rounds before a shard fetch goes plain
 static constexpr int kJobRounds = 3;                 // full passes over a file's CIDs before a download fails
@@ -230,6 +232,17 @@ json SwampCoreImpl::excludedMineJson() {
     }
     return a;
 }
+// loam_core can't tell us when Delivery refuses a channel (its errors are asynchronous and
+// swallowed), so judge by what comes back: posting on a topic for 10 minutes without hearing a
+// single frame on it - not even a catch-up answer - means our posts probably reach nobody.
+json SwampCoreImpl::transportHealth() {
+    json silent = json::array();
+    long long now = nowMs();
+    for (const auto& [topic, h] : m_topicHealth)
+        if (h.tx > 0 && h.lastRx == 0 && h.firstTx && now - h.firstTx > kSilentTopicMs) silent.push_back(topic);
+    return json{{"silentTopics", silent}, {"ok", silent.empty()}};
+}
+
 json SwampCoreImpl::categoriesJson() {
     std::map<std::string, int> count;
     for (const auto& [id, m] : m_cat.models) if (!m.versions.empty() && !m.retracted) count[m.category]++;
@@ -380,6 +393,7 @@ bool SwampCoreImpl::isSubscribedTopic(const std::string& topic) const {
 }
 void SwampCoreImpl::ensureJoined(const std::string& topic) {
     if (topic.empty() || !m_ready || m_joined.count(topic)) return;
+    if (!validContentTopic(topic)) { fprintf(stderr, "[swamp] refusing malformed topic %s\n", topic.c_str()); return; }
     m_joined.insert(topic);
     try { modules().loam_core.joinAsync(topic, [](std::string) {}); } catch (...) {}
 }
@@ -401,6 +415,9 @@ void SwampCoreImpl::sendFrame(const std::string& topic, const json& frame) {
     if (!m_ready || topic.empty()) return;   // catch-up delivers anything we authored offline
     ensureJoined(topic);
     m_tx++;
+    TopicHealth& h = m_topicHealth[topic];
+    h.tx++;
+    if (!h.firstTx) h.firstTx = nowMs();
     try { modules().loam_core.sendSealedAsync(topic, b64std(frame.dump()), [](std::string) {}); }
     catch (const std::exception& e) { fprintf(stderr, "[swamp] send failed: %s\n", e.what()); }
 }
@@ -435,6 +452,7 @@ static long long toMs(int64_t t) {
 void SwampCoreImpl::onFrame(const std::string& topic, const std::string& payloadB64, int64_t sentAt) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!m_joined.count(topic)) return;
+    m_topicHealth[topic].lastRx = nowMs();
     m_rx++;
     if (payloadB64.size() > 512 * 1024) { m_rxBad++; return; }
     std::string s = payloadB64, dec;
@@ -709,6 +727,14 @@ void SwampCoreImpl::flushAnnouncements() {
 
 // 15 s, 30 s, 1 min, ... 30 min. Short at first: a fresh upload often isn't findable in the DHT
 // for the first tens of seconds ("failed to get manifest"), then is.
+// a decimal number from slicer output, independent of the user's locale (see swamp_fp.hpp)
+static double numberAt(const std::string& s, size_t at) {
+    double v = 0;
+    while (at < s.size() && (s[at] == ' ' || s[at] == ':' || s[at] == '=')) at++;
+    std::from_chars(s.data() + at, s.data() + s.size(), v);
+    return v;
+}
+
 static long long backoffMs(int rounds) { return std::min<long long>(15000LL << std::min(std::max(rounds - 1, 0), 7), 30LL * 60 * 1000); }
 
 static bool sha256File(const std::string& path, std::string& hex) {
@@ -931,10 +957,18 @@ json SwampCoreImpl::findSlicer() {
     if (!(forced && *forced) && m_slicerAt && now - m_slicerAt < 30000) return m_slicer;   // snapshot() is polled: don't rescan every time
     m_slicerAt = now;
     m_slicer = detectSlicer();
+    m_bambuSlicers = detectSlicers(true);
     return m_slicer;
 }
-json SwampCoreImpl::detectSlicer() {
-    if (const char* env = getenv("SWAMP_SLICER")) if (*env) return json{{"name", fs::path(env).filename().string()}, {"program", env}, {"args", json::array()}};
+json SwampCoreImpl::detectSlicer() { auto all = detectSlicers(false); return all.empty() ? json() : all[0]; }
+
+// Every slicer installed, best first; bambuOnly = the ones that can slice for a Bambu Lab printer
+// (OrcaSlicer, Bambu Studio). Printing must not stop at "the first slicer found" - with PrusaSlicer
+// as a Flatpak and Orca as an AppImage, that was PrusaSlicer (review 2026-10-07).
+std::vector<json> SwampCoreImpl::detectSlicers(bool bambuOnly) {
+    std::vector<json> out;
+    auto add = [&](json j) { std::string n = str(j, "name"); if (!bambuOnly || n.find("Orca") != std::string::npos || n.find("Bambu") != std::string::npos) out.push_back(j); };
+    if (const char* env = getenv("SWAMP_SLICER")) if (*env) add(json{{"name", fs::path(env).filename().string()}, {"program", env}, {"args", json::array()}});
     const std::vector<std::pair<std::string, std::vector<std::string>>> bins = {
         {"OrcaSlicer", {"orca-slicer", "OrcaSlicer", "orcaslicer"}},
         {"Bambu Studio", {"bambu-studio", "BambuStudio", "bambustudio"}},
@@ -943,7 +977,7 @@ json SwampCoreImpl::detectSlicer() {
     for (const auto& [name, cands] : bins)
         for (const auto& c : cands) {
             QString p = QStandardPaths::findExecutable(QString::fromStdString(c));
-            if (!p.isEmpty()) return json{{"name", name}, {"program", p.toStdString()}, {"args", json::array()}};
+            if (!p.isEmpty()) { add(json{{"name", name}, {"program", p.toStdString()}, {"args", json::array()}}); break; }
         }
     QString flatpak = QStandardPaths::findExecutable("flatpak");
     if (!flatpak.isEmpty()) {
@@ -952,7 +986,7 @@ json SwampCoreImpl::detectSlicer() {
         for (const auto& [name, id] : apps)
             for (const std::string& dir : {std::string("/var/lib/flatpak/app/") + id, homeDir() + "/.local/share/flatpak/app/" + id}) {
                 std::error_code ec;
-                if (fs::exists(dir, ec)) return json{{"name", name + " (Flatpak)"}, {"program", flatpak.toStdString()}, {"args", {"run", id}}};
+                if (fs::exists(dir, ec)) { add(json{{"name", name + " (Flatpak)"}, {"program", flatpak.toStdString()}, {"args", {"run", id}}}); break; }
             }
     }
     const std::vector<std::pair<std::string, std::string>> images = {{"OrcaSlicer", "orca"}, {"Bambu Studio", "bambu"}, {"PrusaSlicer", "prusaslicer"}};
@@ -965,10 +999,10 @@ json SwampCoreImpl::detectSlicer() {
                 std::string fn = de.path().filename().string(), low = fn;
                 for (auto& c : low) c = (char)std::tolower((unsigned char)c);
                 if (low.find(needle) != std::string::npos && low.size() > 9 && low.compare(low.size() - 9, 9, ".appimage") == 0)
-                    return json{{"name", name + " (AppImage)"}, {"program", de.path().string()}, {"args", json::array()}};
+                    add(json{{"name", name + " (AppImage)"}, {"program", de.path().string()}, {"args", json::array()}});
             }
         }
-    return nullptr;
+    return out;
 }
 
 std::string SwampCoreImpl::launchSlicer(const DownloadJob& j) {
@@ -1129,6 +1163,7 @@ std::string SwampCoreImpl::snapshot() {
     return json{{"ok", true}, {"version", SWAMP_VERSION}, {"status", m_status}, {"hub", m_hub},
                 {"me", {{"address", m_id.address}, {"profile", profile}}},
                 {"categories", categoriesJson()},
+                {"transport", transportHealth()},
                 {"slicer", findSlicer()},
                 {"printer", printerPublic()}, {"printJob", m_pjob}, {"discovering", m_discovering}, {"discovered", m_discovered},
                 {"index", {{"indexer", m_indexer}, {"built", m_indexesBuilt}, {"known", m_cat.indexes.size()}, {"privacyDowngrades", m_privacyDowngrades},
@@ -1361,13 +1396,33 @@ void SwampCoreImpl::indexTick() {
 // CLIENT: the manifest to search - the newest one, from any indexer. How many indexers agree with
 // it (same catalogue root, same shard hashes) is reported with every answer (ADR 0016 builds on it).
 json SwampCoreImpl::bestManifest() {
-    json best, fallback;
+    // The sender chooses its event's timestamp, so "newest" alone lets anyone win by dating a
+    // manifest in the year 2100 (review 2026-10-07). Instead:
+    //  - ignore manifests dated in the future (beyond clock skew) or too old to be useful;
+    //  - prefer the content most independent indexers agree on (same root, same shards);
+    //  - newest only breaks ties; indexers caught omitting come last.
+    long long now = nowMs();
+    struct Group { json newest; int indexers = 0, caught = 0; };
+    std::map<std::string, Group> groups;
     for (const auto& [who, mf] : m_cat.indexes) {
-        bool caught = m_omissions.count(who) > 0;   // signed proof it left something out undeclared
-        json& slot = caught ? fallback : best;
-        if (slot.is_null() || num(mf, "published") > num(slot, "published")) slot = mf;
+        long long at = num(mf, "published");
+        if (at > now + kMaxClockLeadMs || at < now - kManifestMaxAgeMs) continue;
+        std::string key = str(mf, "root") + "|" + (mf.contains("shards") ? mf["shards"].dump() : "");
+        Group& g = groups[key];
+        g.indexers++;
+        if (m_omissions.count(who)) g.caught++;
+        if (g.newest.is_null() || at > num(g.newest, "published")) g.newest = mf;
     }
-    return best.is_null() ? fallback : best;
+    const Group* best = nullptr;
+    for (const auto& [k, g] : groups) {
+        if (!best) { best = &g; continue; }
+        int honestA = g.indexers - g.caught, honestB = best->indexers - best->caught;
+        if (honestA != honestB ? honestA > honestB : num(g.newest, "published") > num(best->newest, "published")) best = &g;
+    }
+    if (!best) return json();
+    json out = best->newest;
+    out["agreeing"] = best->indexers;
+    return out;
 }
 
 // CREATORS AUDIT THE INDEXERS (ADR 0016). For every indexer's newest manifest, check that each of
@@ -1391,12 +1446,24 @@ void SwampCoreImpl::checkInclusion() {
                 m_excludedMine[who + "|" + id] = why;
                 continue;
             }
-            auto ws = index::words(m.versions.back().value("title", ""));
-            if (ws.empty()) continue;
-            std::string key = index::shardKeyFor(ws[0]);
-            json sh = shard(mf, key);
-            if (sh.is_null()) { m_lastInclusion = now - m_inclusionEveryMs + 5000; continue; }   // fetching: look again soon
-            bool there = sh.contains("entries") && sh["entries"].contains(id);
+            // every term the model is indexed under - title words and tags - must lead to it; an
+            // indexer could otherwise drop it from all but the first word's file (review 2026-10-07)
+            std::set<std::string> terms;
+            for (const auto& w : index::words(m.versions.back().value("title", ""))) terms.insert(w);
+            for (const auto& g : arr(m.versions.back(), "tags")) if (g.is_string()) for (const auto& w : index::words(g.get<std::string>())) terms.insert(w);
+            if (terms.empty()) continue;
+            bool pending = false, there = true;
+            std::string key;
+            for (const auto& t : terms) {
+                std::string k = index::shardKeyFor(t);
+                json sh = shard(mf, k);
+                if (sh.is_null()) { pending = true; break; }
+                bool listed = false;
+                if (sh.contains("terms") && sh["terms"].is_object() && sh["terms"].contains(t))
+                    for (const auto& x : sh["terms"][t]) if (x.is_string() && x.get<std::string>() == id) { listed = true; break; }
+                if (!listed || !sh.contains("entries") || !sh["entries"].contains(id)) { there = false; key = k; break; }
+            }
+            if (pending) { m_lastInclusion = now - m_inclusionEveryMs + 5000; continue; }   // fetching: look again soon
             std::string skey = who + "|" + id;
             if (there) { m_suspects.erase(skey); continue; }
             if (m_omissions.count(who)) continue;
@@ -1435,8 +1502,14 @@ json SwampCoreImpl::shard(const json& mf, const std::string& key) {
     if (haveBlob(sha)) {
         std::string bytes;
         json j = readFile(blobPath(sha), bytes) ? json::parse(bytes, nullptr, false) : json();
-        if (j.is_object()) { if (m_shardCache.size() > 64) m_shardCache.clear(); m_shardCache[sha] = j; return j; }
-        return json::object();
+        if (key[0] == 't') {   // term shards are cleaned before use; record shards are signed events, checked one by one
+            json c = index::cleanTermShard(j);
+            if (c.is_null()) { m_badShards++; c = json::object(); }
+            j = c;
+        } else if (!j.is_object()) { m_badShards++; j = json::object(); }
+        if (m_shardCache.size() > 64) m_shardCache.clear();
+        m_shardCache[sha] = j;
+        return j;
     }
     m_extraCids[sha] = {str(ref, "cid")};
     // Private (Mix) shard fetches are opt-in: on logos.test (2026-10) every Mix lookup failed, and a
@@ -1449,6 +1522,10 @@ json SwampCoreImpl::shard(const json& mf, const std::string& key) {
 
 std::string SwampCoreImpl::globalSearch(std::string queryJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    try { return globalSearchImpl(queryJson); }
+    catch (const std::exception& e) { return fail(std::string("Search failed: ") + e.what()); }
+}
+std::string SwampCoreImpl::globalSearchImpl(const std::string& queryJson) {
     json q = parseArg(queryJson);
     if (!q.is_object()) q = json::object();
     json mf = bestManifest();
@@ -1467,6 +1544,12 @@ std::string SwampCoreImpl::globalSearch(std::string queryJson) {
         for (auto e : index::search(str(q, "q"), terms, str(q, "category"), limit)) {
             std::string mid = str(e, "m");
             bool held = m_cat.models.count(mid) && !m_cat.models[mid].versions.empty();
+            // index entries are the indexer's word; for models we hold, show the signed facts
+            if (held) {
+                json c = card(m_cat.models[mid]);
+                e["t"] = c["title"]; e["s"] = c["summary"]; e["a"] = c["creator"]; e["n"] = c["creatorName"];
+                e["k"] = c["likes"]; e["mk"] = c["makes"]; e["l"] = c["licence"]; e["c"] = c["category"]; e["v"] = c["latest"];
+            }
             // remote thumbnails go through the same lazy, verified picture path
             if (e.contains("th") && e["th"].is_object()) {
                 std::string sha = str(e["th"], "sha");
@@ -1481,15 +1564,14 @@ std::string SwampCoreImpl::globalSearch(std::string queryJson) {
                                    {"creatorName", str(e, "n").empty() ? str(e, "a").substr(0, 10) : str(e, "n")}, {"latest", num(e, "v")},
                                    {"licence", str(e, "l")}, {"category", str(e, "c")}, {"likes", num(e, "k")}, {"makes", num(e, "mk")},
                                    {"thumb", nullptr}, {"thumbSha", e.contains("th") && e["th"].is_object() ? str(e["th"], "sha") : ""},
-                                   {"remix", e.value("remix", false)}, {"held", held}});
+                                   {"remix", flag(e, "remix")}, {"held", held}, {"verified", held}});
         }
     }
-    int agree = 0;
-    for (const auto& [who, other] : m_cat.indexes) agree += str(other, "root") == str(mf, "root") && other["shards"] == mf["shards"];
+    int agree = (int)num(mf, "agreeing");
     return ok(json{{"results", results}, {"pending", pending},
                    {"index", {{"indexer", str(mf, "indexer")}, {"indexerName", nameOf(str(mf, "indexer"))}, {"models", num(mf, "models")},
                               {"ageMs", nowMs() - num(mf, "published")}, {"indexers", m_cat.indexes.size()}, {"agreeing", agree},
-                              {"privacyDowngrades", m_privacyDowngrades}, {"private", m_privateShards}}}});
+                              {"privacyDowngrades", m_privacyDowngrades}, {"private", m_privateShards}, {"badShards", m_badShards}}}});
 }
 
 // Opening a model you don't follow: take its events from the index's record shard - only that
@@ -1562,6 +1644,7 @@ bambu::Printer SwampCoreImpl::printerConf() {
     p.model = str(m_printer, "model"); p.name = str(m_printer, "name");
     if (num(m_printer, "mqttPort") > 0) p.mqttPort = (int)num(m_printer, "mqttPort");
     if (num(m_printer, "ftpsPort") > 0) p.ftpsPort = (int)num(m_printer, "ftpsPort");
+    p.certPinMqtt = str(m_printer, "certPinMqtt"); p.certPinFtps = str(m_printer, "certPinFtps");
     return p;
 }
 json SwampCoreImpl::printerPublic() {
@@ -1597,7 +1680,9 @@ std::string SwampCoreImpl::setPrinter(std::string printerJson) {
     if (ip.empty() || serial.empty()) return fail("The printer needs an IP address and a serial number (both shown on the printer, or use Find printers)");
     if (code.empty() && str(m_printer, "serial") == serial) code = str(m_printer, "accessCode");   // keep the saved one
     if (code.empty()) return fail("Enter the printer's access code (Settings > LAN only mode on the printer's screen)");
+    json old = m_printer;
     m_printer = json{{"kind", "bambu"}, {"ip", ip}, {"serial", serial}, {"accessCode", code}, {"model", clip(p, "model", 32)}, {"name", clip(p, "name", 60)}};
+    // setting the same printer up again keeps nothing pinned: that's how a reset/replaced printer is re-trusted
     for (const char* k : {"mqttPort", "ftpsPort"}) if (num(p, k) > 0) m_printer[k] = num(p, k);
     writeFile(m_dataDir + "/printer.json", m_printer.dump());
     std::error_code ec;   // the access code: owner-only
@@ -1607,17 +1692,27 @@ std::string SwampCoreImpl::setPrinter(std::string printerJson) {
     return ok(json{{"printer", printerPublic()}});
 }
 
+// Pin the printer's certificate the first time we see it (TOFU), per service.
+void SwampCoreImpl::pinPrinterCert(const char* field, const std::string& pin) {
+    if (pin.empty() || !str(m_printer, field).empty() || str(m_printer, "ip").empty()) return;
+    m_printer[field] = pin;
+    writeFile(m_dataDir + "/printer.json", m_printer.dump());
+    std::error_code ec;
+    fs::permissions(m_dataDir + "/printer.json", fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+}
+
 void SwampCoreImpl::refreshPrinterState() {
     if (m_printerPolling || str(m_printer, "ip").empty()) return;
     m_printerPolling = true;
     bambu::Printer p = printerConf();
     runAsync([p] {
-        json st; std::string err;
-        bool okk = bambu::status(p, st, err);
-        return json{{"ok", okk}, {"state", st}, {"error", err}};
+        json st; std::string err, pin;
+        bool okk = bambu::status(p, st, err, &pin);
+        return json{{"ok", okk}, {"state", st}, {"error", err}, {"pin", pin}};
     }, [this](json r) {
         m_printerPolling = false;
         m_printerStateAt = nowMs();
+        if (r.value("ok", false)) pinPrinterCert("certPinMqtt", str(r, "pin"));
         if (r.value("ok", false)) {
             const json& st = r["state"];
             m_printerState = json{{"state", str(st, "gcode_state")}, {"percent", num(st, "mc_percent")}, {"remainingMin", num(st, "mc_remaining_time")},
@@ -1637,13 +1732,24 @@ std::string SwampCoreImpl::printerStatus() {
 // OrcaSlicer (or Bambu Studio) on this machine, plus the folder holding its BBL profiles - for an
 // AppImage, the three profile files are extracted once into <data>/orca/.
 json SwampCoreImpl::orcaFor(const json& profiles, std::string& err) {
-    json sl = findSlicer();
-    std::string prog = sl.is_object() ? str(sl, "program") : "", name = sl.is_object() ? str(sl, "name") : "";
-    if (const char* o = getenv("SWAMP_ORCA")) { prog = o; name = "OrcaSlicer"; sl = json{{"program", prog}, {"args", json::array()}}; }
-    if (prog.empty() || (name.find("Orca") == std::string::npos && name.find("Bambu") == std::string::npos)) {
-        err = "Printing to a Bambu Lab printer needs OrcaSlicer or Bambu Studio installed (it slices with the printer's own profile)";
+    findSlicer();   // refresh the lists (cached ~30 s)
+    json sl;
+    if (const char* o = getenv("SWAMP_ORCA")) sl = json{{"name", "OrcaSlicer"}, {"program", o}, {"args", json::array()}};
+    else { auto c = m_bambuSlicers; if (!c.empty()) sl = c[0]; }
+    if (sl.is_null()) {
+        json any = findSlicer();
+        err = "Printing to a Bambu Lab printer needs OrcaSlicer (2.4 or newer) or Bambu Studio installed - it slices with the printer's own profile." +
+              (any.is_object() ? std::string(" Found only ") + str(any, "name") + ", which can open models but has no Bambu Lab profiles." : std::string(""));
         return nullptr;
     }
+    std::string prog = str(sl, "program"), name = str(sl, "name");
+    return sl;
+}
+
+// Where the slicer's Bambu Lab profiles are - for an AppImage, extracted once into <data>/orca/.
+// Slow the first time (up to minutes): runs on the worker thread, never under the module's lock.
+static json locateBblProfiles(const json& sl, const json& profiles, const std::string& dataDir, std::string& err) {
+    std::string prog = str(sl, "program"), name = str(sl, "name");
     auto findIn = [&](const std::string& root) -> std::string {
         std::error_code ec;
         if (!fs::is_directory(root, ec)) return "";
@@ -1660,7 +1766,7 @@ json SwampCoreImpl::orcaFor(const json& profiles, std::string& err) {
     bool appimage = lowerExt(prog) == "appimage";
     if (!bbl.empty()) {
     } else if (appimage) {
-        std::string dir = m_dataDir + "/orca";
+        std::string dir = dataDir + "/orca";
         bbl = findIn(dir);
         if (bbl.empty()) {
             std::error_code ec; fs::create_directories(dir, ec);
@@ -1712,8 +1818,9 @@ std::string SwampCoreImpl::preparePrint(std::string modelId, std::string version
 void SwampCoreImpl::beginSlice(const DownloadJob& j) {
     json prof = profilesFor(str(m_printer, "model"));
     std::string err;
-    json orca = orcaFor(prof, err);
-    if (orca.is_null()) { m_pjob["stage"] = "failed"; m_pjob["message"] = err; publishState(); return; }
+    json slicer = orcaFor(prof, err);
+    if (slicer.is_null()) { m_pjob["stage"] = "failed"; m_pjob["message"] = err; publishState(); return; }
+    std::string dataDir = m_dataDir;
     std::vector<std::string> meshes, projects;
     for (const auto& [sha, name] : j.files) {
         std::string e = lowerExt(name), path = j.dir + "/" + name;
@@ -1722,11 +1829,14 @@ void SwampCoreImpl::beginSlice(const DownloadJob& j) {
     }
     if (meshes.empty() && projects.empty()) { m_pjob["stage"] = "failed"; m_pjob["message"] = "This version has no model files to print"; publishState(); return; }
     m_pjob["stage"] = "slicing";
-    m_pjob["message"] = "Slicing with " + str(orca, "name") + " (" + str(prof, "process") + ", " + str(prof, "filament") + ")...";
+    m_pjob["message"] = "Slicing with " + str(slicer, "name") + " (" + str(prof, "process") + ", " + str(prof, "filament") + ")...";
     publishState();
     std::string out = m_dataDir + "/print/" + newId().substr(0, 8), cfg = m_dataDir + "/orca-config";
     std::string remote = "swamp-" + str(m_pjob, "modelId").substr(0, 8) + "-v" + std::to_string(num(m_pjob, "v")) + ".gcode.3mf";
-    runAsync([orca, prof, meshes, projects, out, cfg, remote] {
+    runAsync([slicer, prof, meshes, projects, out, cfg, remote, dataDir] {
+        std::string perr;
+        json orca = locateBblProfiles(slicer, prof, dataDir, perr);
+        if (orca.is_null()) return json{{"ok", false}, {"error", perr}};
         std::error_code ec;
         fs::create_directories(out, ec); fs::create_directories(cfg, ec);
         auto run = [&](QStringList args, std::string& log) {
@@ -1756,7 +1866,16 @@ void SwampCoreImpl::beginSlice(const DownloadJob& j) {
                          "--load-filaments", QString::fromStdString(bbl + "/filament/" + str(prof, "filament") + ".json"),
                          "--outputdir", QString::fromStdString(out), "--export-3mf", QString::fromStdString(remote)};
         for (const auto& in : inputs) args << QString::fromStdString(in);
-        if (!run(args, log)) return json{{"ok", false}, {"error", "Slicing failed: " + log.substr(log.size() > 300 ? log.size() - 300 : 0)}};
+        if (!run(args, log)) {
+            // say what to do, not just what the slicer printed (review 2026-10-07)
+            std::string hint;
+            if (log.find("libwebkit2gtk") != std::string::npos)
+                hint = str(orca, "name") + " can't start: it needs the system's WebKitGTK library (" + (log.find("4.0") != std::string::npos ? "libwebkit2gtk-4.0" : "libwebkit2gtk-4.1") + "). Install it, or use OrcaSlicer 2.4+ or Bambu Studio.";
+            else if (log.find("G92 E0") != std::string::npos || log.find("layer_gcode") != std::string::npos)
+                hint = "This " + str(orca, "name") + " build rejects the A1's own profile (seen with OrcaSlicer 2.3 betas). Use OrcaSlicer 2.4+ or Bambu Studio.";
+            std::string tail = log.substr(log.size() > 300 ? log.size() - 300 : 0);
+            return json{{"ok", false}, {"error", hint.empty() ? "Slicing failed: " + tail : hint + " (" + tail.substr(tail.size() > 120 ? tail.size() - 120 : 0) + ")"}};
+        }
         std::string file = out + "/" + remote, gcode;
         if (!fs::exists(file, ec)) return json{{"ok", false}, {"error", "The slicer produced no file"}};
         // the estimate, from the G-code header
@@ -1768,10 +1887,17 @@ void SwampCoreImpl::beginSlice(const DownloadJob& j) {
             if (line.empty() || line[0] != ';') continue;
             auto at = line.find("total estimated time: ");
             if (at != std::string::npos) est["time"] = line.substr(at + 22);
-            if (line.rfind("; total layer number: ", 0) == 0) est["layers"] = atoi(line.c_str() + 22);
-            if (line.rfind("; filament used [mm] = ", 0) == 0) est["filamentM"] = std::round(atof(line.c_str() + 23) / 100.0) / 10.0;
-            if (line.rfind("; filament used [cm3] = ", 0) == 0) est["filamentG"] = std::round(atof(line.c_str() + 24) * 1.24);   // PLA
-            if (est.contains("time") && est.contains("layers") && est.contains("filamentG")) break;
+            if (line.rfind("; total layer number", 0) == 0) est["layers"] = (int)numberAt(line, 20);
+            // OrcaSlicer: "; filament used [mm] = 14168.04", "; filament used [cm3] = 34.08"
+            // Bambu Studio: "; total filament length [mm] : 13732.79" (its weight line is 0 when the
+            // profile's density is 0, so grams come from length)
+            if (line.rfind("; filament used [mm]", 0) == 0 || line.rfind("; total filament length [mm]", 0) == 0) {
+                double mm = numberAt(line, line.find(']') + 1);
+                if (mm > 0) est["filamentM"] = std::round(mm / 100.0) / 10.0;
+            }
+            if (line.rfind("; filament used [cm3]", 0) == 0) { double cm3 = numberAt(line, line.find(']') + 1); if (cm3 > 0) est["filamentG"] = std::round(cm3 * 1.24); }   // PLA
+            if (line.rfind("; total filament weight [g]", 0) == 0) { double g = numberAt(line, line.find(']') + 1); if (g > 0) est["filamentG"] = std::round(g); }
+            if (est.contains("time") && est.contains("layers") && (est.contains("filamentG") || est.contains("filamentM")) && est.contains("filamentG")) break;
         }
         if (!est.contains("filamentG") && est.contains("filamentM"))   // 1.75 mm PLA
             est["filamentG"] = std::round(est["filamentM"].get<double>() * 1000.0 * 3.14159265 * 0.875 * 0.875 * 1.24 / 1000.0);
@@ -1798,6 +1924,13 @@ std::string SwampCoreImpl::startPrint(std::string confirm) {
     auto life = m_life;
     runAsync([this, life, p, file, remote, title] {
         std::string err;
+        // never start into a printer that's busy with something else (review 2026-10-07)
+        json st;
+        if (!bambu::status(p, st, err)) return json{{"ok", false}, {"error", err}};
+        std::string state = st.contains("gcode_state") && st["gcode_state"].is_string() ? st["gcode_state"].get<std::string>() : "";
+        if (!state.empty() && state != "IDLE" && state != "FINISH" && state != "FAILED")
+            return json{{"ok", false}, {"error", "The printer is busy (" + state + (st.contains("mc_percent") ? ", " + st["mc_percent"].dump() + "%" : "") + "). Wait until it's done, then start again."}};
+        std::string ftpsPin;
         long long lastPost = 0;
         bool up = bambu::upload(p, file, remote, err, [&](long long s, long long t) {
             long long now = bambu::msNow();
@@ -1805,8 +1938,9 @@ std::string SwampCoreImpl::startPrint(std::string confirm) {
             lastPost = now;
             int pct = (int)(s * 100 / t);
             if (*life) onLoop([this, life, pct] { if (!*life) return; std::lock_guard<std::recursive_mutex> lk(m_mtx); if (str(m_pjob, "stage") == "uploading") m_pjob["progress"] = pct; });
-        });
+        }, &ftpsPin);
         if (!up) return json{{"ok", false}, {"error", err}};
+        if (*life) onLoop([this, life, ftpsPin] { if (!*life) return; std::lock_guard<std::recursive_mutex> lk(m_mtx); pinPrinterCert("certPinFtps", ftpsPin); });
         if (*life) onLoop([this, life] { if (!*life) return; std::lock_guard<std::recursive_mutex> lk(m_mtx); m_pjob["stage"] = "starting"; m_pjob["message"] = "Starting the print..."; publishState(); });
         if (!bambu::startPrint(p, remote, title, false, err)) return json{{"ok", false}, {"error", err}};
         return json{{"ok", true}};

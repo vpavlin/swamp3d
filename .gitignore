@@ -5,3 +5,5 @@ bench/results/fps.json
 bench/results/verify-*.json
 result
 result-*
+swamp_core/test/fake-orca-args.txt
+swamp_core/test/result.json

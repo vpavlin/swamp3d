@@ -1,42 +1,61 @@
-# Swamp (working name: "Swamp Dimension")
+# Swamp
 
 A decentralized place to share 3D models.
 
-> Status: **research**, started 2026-10-05. Nothing is built yet. Not endorsed by or affiliated with
-> Logos; built on the Logos tech stack.
+> Status: **working prototype** (0.5.x). It runs in Logos Basecamp 0.3 and has been tested headless
+> and in the GUI on the Logos test network. It is not audited, the test network resets, and LAN
+> printing has only been tested against a fake printer. Not endorsed by or affiliated with Logos;
+> built on the Logos tech stack.
 
 A Printables / MakerWorld / Thingiverse-style library for 3D models and maker projects that no
-company runs: a Basecamp desktop app (plus Android later), files in Logos Storage, the catalogue,
-comments and makes as signed events over Logos Messaging, and LEZ for payments and for anchoring
-when each version was published.
+company runs:
+- a Basecamp desktop app;
+- files in Logos Storage;
+- the catalogue, comments and makes as signed events over Logos Messaging;
+- LEZ, later, for tips and for anchoring when each version was published.
 
 Core properties: **privacy, pseudonymity, censorship resistance**. Hard requirement from day one:
 **stolen copies must be flaggable** with evidence anyone can check, without a central moderator
 and without deleting anything.
 
-## Reading order
+## What works
 
-1. [notes/01-landscape.md](notes/01-landscape.md) - the centralized sites: what a model page holds,
-   fees, licences, remixes, moderation, theft, lock-in; prior decentralized attempts; MUST/SHOULD/LATER.
-2. [notes/02-storage.md](notes/02-storage.md) - Logos Storage today: API, durability (none
-   guaranteed), the 30-day block TTL, pinning hubs, encrypted paid files, large files.
-3. [notes/03-lez-chain.md](notes/03-lez-chain.md) - LEZ and Bedrock: payments, proving a payment,
-   pay-to-unlock (fair exchange), anchoring options, identity binding, maturity.
-4. [notes/04-basecamp-ui-preview.md](notes/04-basecamp-ui-preview.md) - can Basecamp show a 3D
-   model? (No Qt Quick 3D; WebEngine is bundled.)
-5. notes/05a - 3D fingerprints, provenance and decentralized flagging (prior art).
-6. [RESEARCH.md](RESEARCH.md) - the synthesis: architecture, what goes where, open questions.
-7. [docs/THEFT.md](docs/THEFT.md) - the design for flagging stolen models.
-8. [docs/adr/](docs/adr/) - proposed decisions.
+- **Publishing:** files are hashed, then get a thumbnail and a shape fingerprint, and upload in the
+  background.
+- **Browsing** the categories you follow (an offline copy per category).
+- **Global search** over signed, deterministic index snapshots in Storage.
+- **Model pages:** versions, remixes, makes with photos, comments, likes, retract.
+- **Verified downloads**, and "Open in slicer" (OrcaSlicer, Bambu Studio, PrusaSlicer).
+- **LAN printing** to a Bambu Lab A1 / A1 mini in Developer Mode: slice locally with the printer's
+  default profile, confirm, upload, start. No cloud.
+- **Indexer audits:** declared exclusions, plus the creator's own inclusion checks.
 
-## Decisions so far (vpavlin, 2026-10-05)
+## Layout
 
-- Name: **Swamp** ("Swamp Dimension").
-- UI target: **Basecamp 0.3**.
-- Anchoring: **LEZ** (a registry program; Bedrock inscriptions not pursued for now).
-- Scope: **free models with tips** first; paid models later.
-- Repo stays **local** for now.
+- `swamp_core/`: the core module (C++, universal Basecamp 0.3 module).
+  - `src/swamp_core_impl.*`: the module;
+  - `src/swamp_catalog.hpp`: catalogue rules;
+  - `src/swamp_index.hpp`: the search index;
+  - `src/swamp_bambu.hpp`: the printer client;
+  - `src/swamp_fp.hpp`, `src/swamp_thumb.hpp`: fingerprints and thumbnails.
+- `module/`: the QML view.
+- `packages/fp/`: the JS reference fingerprint; `bench/`: the fingerprint benchmark (its data set is
+  git-ignored).
+- `hub/`: two-node scripts that run against the live Logos test network.
+- `site/`: the website.
+- `docs/`: SPEC, ADRs 0001-0017, roadmap, reviews.
 
-## Proof of concept
+## Building and testing
 
-See docs/POC.md. Step 1 (fingerprint benchmark) is under way: packages/fp, bench/.
+- **Packages:** `nix build .#lgx-portable` in `swamp_core/` and in `module/` (logos-module-builder 0.3.1).
+- **Tests:** `swamp_core/test/run-tests.sh` runs catalogue, index, fingerprint parity (C and cs_CZ
+  locale), printer client (against a fake Bambu printer) and end-to-end checks.
+  - Needs g++, OpenSSL, Qt6Core, nlohmann-json (`json-devel` on Fedora), python3 and node.
+  - Test meshes are committed under `swamp_core/test/meshes/` (`gen-test-meshes.py`).
+- **Live tests:** `hub/two-node.sh` and `hub/search-live.sh`, with `LOGOSCTL` and `LGX_DIR` set
+  (see the script headers).
+
+## Background reading
+
+Start with `notes/01`–`05a`, `RESEARCH.md` and `docs/THEFT.md`. The decisions live in `docs/adr/`,
+the protocol in `docs/SPEC.md`, and the plan in `docs/ROADMAP.md`.

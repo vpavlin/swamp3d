@@ -45,9 +45,20 @@ inline void FakeLoamCore::startAsync(const std::string&, Cb cb) {
     FakeLoamNode* n = node;
     FakeLoamBus::later([n, cb] { n->up = true; cb(""); if (n->onStatus && !n->dropStatusEvent) n->onStatus("Connected"); });
 }
-inline void FakeLoamCore::joinAsync(const std::string& topic, Cb cb) { node->topics.insert(topic); FakeLoamBus::later([cb] { cb(""); }); }
+// Like Delivery's channels: a malformed content topic can't be joined or sent on (the real error is
+// asynchronous and swallowed upstream, so here too the caller hears nothing).
+inline bool fakeValidTopic(const std::string& t) {
+    std::vector<std::string> parts; size_t i = 1;
+    if (t.empty() || t[0] != '/') return false;
+    while (i <= t.size()) { size_t j = t.find('/', i); if (j == std::string::npos) j = t.size(); parts.push_back(t.substr(i, j - i)); i = j + 1; }
+    for (const auto& p : parts) if (p.empty()) return false;
+    if (parts.size() == 4) return true;
+    if (parts.size() == 5) { for (char c : parts[0]) if (c < '0' || c > '9') return false; return true; }
+    return false;
+}
+inline void FakeLoamCore::joinAsync(const std::string& topic, Cb cb) { if (fakeValidTopic(topic)) node->topics.insert(topic); FakeLoamBus::later([cb] { cb(""); }); }
 inline void FakeLoamCore::sendSealedAsync(const std::string& topic, const std::string& b64, Cb cb) {
-    node->tx++; FakeLoamBus::get().send(node, topic, b64); FakeLoamBus::later([cb] { cb(""); });
+    node->tx++; if (fakeValidTopic(topic)) FakeLoamBus::get().send(node, topic, b64); FakeLoamBus::later([cb] { cb(""); });
 }
 inline void FakeLoamCore::statusAsync(Cb cb) {
     FakeLoamNode* n = node;

@@ -1,6 +1,6 @@
 # 0016. Optional anonymous query hubs, kept honest by redundancy, audits and declared exclusions
 
-- Status: Accepted. Built in 0.4.0: declared exclusion lists, creator inclusion checks with signed omission evidence, indexer choice that avoids caught indexers. Not built yet: live query hubs, audits with known-answer queries, shared reports
+- Status: Accepted. Built in 0.4.0-0.5.2: declared exclusion lists, creator inclusion checks (all terms) with signed omission evidence and a suspect/re-send step, manifest choice by agreement with future dates ignored. Not built yet: live query hubs, audits with known-answer queries, shared reports, a user-chosen trust list
 - Date: 2026-10-05
 
 ## Context
@@ -40,8 +40,11 @@ and hash), never free-form claims.
 - **Creators audit their own inclusion:** a creator's node fetches the shards for its own terms
   each epoch.
 - A signed shard for an epoch after a model's anchored publication that lacks the model is a
-  **publicly checkable proof of omission**. Clients drop that indexer automatically, and the
-  proof can be shared.
+  **publicly checkable proof of omission**. Built so far: the creator's own client stops preferring
+  that indexer. Not built yet: sharing the proof, so other clients react too (review 2026-10-07:
+  the wording here read stronger than the implementation).
+- The audit checks every term the model is indexed under (title words and tags), not just the
+  first title word (0.5.2).
 
 **Missing is not yet omitted (found in the Basecamp test, 0.5.1).** An indexer that was offline,
 or that ran while the creator's node was offline, simply never received the model. Flagging it on

@@ -1,6 +1,6 @@
 # 0017. Print to Bambu Lab printers over the LAN; slice locally with the printer's default profile
 
-- Status: Accepted. Built in 0.5.0. Tested against a fake printer (bambu_mock.py) and with the real
+- Status: Accepted. Built in 0.5.0; certificate pins and busy-printer check in 0.5.2. Tested against a fake printer (bambu_mock.py) and with the real
   OrcaSlicer 2.4.2. Not yet tested on a real printer.
 - Date: 2026-10-06
 
@@ -31,8 +31,12 @@ without it. The cloud API needs an account and is unofficial.
     session) to the SD root;
   - MQTT 3.1.1 over TLS on 8883: `device/<serial>/request` with `project_file`
     (`param: Metadata/plate_1.gcode`, `url: file:///sdcard/<file>`), status from `device/<serial>/report`.
-  - The printer's certificate isn't verified: it's signed by Bambu's CA, which we don't ship; the
-    access code authenticates.
+  - The printer's certificate is signed by Bambu's CA, which we don't ship. Instead Swamp **pins it
+    on first use** (SHA-256, one pin per service, MQTT and FTPS) and refuses a changed certificate
+    before sending the access code (0.5.2, review 2026-10-07).
+- **Never interrupt a running job.** `startPrint` reads the printer's state first and refuses unless
+  it's IDLE, FINISH or FAILED. It accepts only the `project_file` reply carrying its own
+  `sequence_id`, or a status naming its own job.
 - **A person confirms.** `preparePrint` stops at `ready` with the slicer's estimate. Only
   `startPrint("yes")`, behind a confirm dialog, sends anything.
 - **Secrets:** `printer.json` is owner-only, and the access code is never returned by the API.
@@ -49,6 +53,7 @@ without it. The cloud API needs an account and is unofficial.
   printer.
 - Only the A1 and A1 mini are mapped so far. Others need their profile names (P1/X1 use
   `file:///mnt/sdcard` or `ftp:///` URLs: to verify).
-- Needs OrcaSlicer or Bambu Studio installed. The Bambu Studio CLI is assumed to accept the same
-  options as Orca's (Orca descends from it); unverified.
+- Needs OrcaSlicer 2.4+ (tested: 2.4.2 AppImage) or Bambu Studio 2.x installed. The Bambu Studio
+  CLI is assumed to accept the same options as Orca's (Orca descends from it); unverified. PrusaSlicer
+  works for "Open in slicer" only, since it has no Bambu profiles.
 - Bambu can change the rules with a firmware update again.

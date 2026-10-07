@@ -20,7 +20,20 @@ inline const std::string DOMAIN = "swamp";
 // Topics (ADR 0014). Nobody mirrors the whole catalogue: a model and everything about it lives on
 // its category's topic; profiles live on one small people topic.
 inline const std::string PEOPLE_TOPIC = "/swamp/2/people/proto";
-inline std::string categoryTopic(const std::string& cat) { return "/swamp/2/cat/" + cat + "/proto"; }
+// Waku content topics are /app/version/name/encoding (or /generation/app/version/name/encoding with
+// a numeric generation): a 5-part "/swamp/2/cat/x/proto" is rejected by Delivery's channels
+// ("generation should be a numeric value") - found in review 2026-10-07. Four parts only.
+inline std::string categoryTopic(const std::string& cat) { return "/swamp/2/cat-" + cat + "/proto"; }
+inline bool validContentTopic(const std::string& t) {
+    if (t.empty() || t[0] != '/') return false;
+    std::vector<std::string> parts;
+    size_t i = 1;
+    while (i <= t.size()) { size_t j = t.find('/', i); if (j == std::string::npos) j = t.size(); parts.push_back(t.substr(i, j - i)); i = j + 1; }
+    for (const auto& p : parts) if (p.empty()) return false;
+    if (parts.size() == 4) return true;
+    if (parts.size() == 5) { for (char c : parts[0]) if (c < '0' || c > '9') return false; return true; }
+    return false;
+}
 // The category list is part of the protocol: adding one is an app update. "other" catches the rest.
 inline const std::vector<std::pair<std::string, std::string>>& categories() {
     static const std::vector<std::pair<std::string, std::string>> C = {

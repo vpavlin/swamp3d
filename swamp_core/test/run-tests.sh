@@ -14,6 +14,6 @@ MOCK="$OUT/bambu-mock"; rm -rf "$MOCK"; mkdir -p "$MOCK"
 python3 "$HERE/bambu_mock.py" "$MOCK" 29990 28883 22021 03919A3B0000001 12345678 > "$MOCK/py.log" 2>&1 &
 MOCKPID=$!; trap 'kill $MOCKPID 2>/dev/null' EXIT
 for i in $(seq 1 50); do [ -f "$MOCK/ready" ] && break; sleep 0.2; done
-$CXX "$HERE/bambu_test.cpp" -lssl -lcrypto -o "$OUT/bambu_test" && "$OUT/bambu_test" "$MOCK" 29990 28883 22021 "$HERE/../../bench/data/raw/74890.stl"
+$CXX "$HERE/bambu_test.cpp" -lssl -lcrypto -o "$OUT/bambu_test" && "$OUT/bambu_test" "$MOCK" 29990 28883 22021 "$HERE/meshes/torus.stl"
 rm -f "$HERE/fake-orca-args.txt"
 SWAMP_MOCK_PRINTER="$MOCK" SWAMP_MOCK_MQTT=28883 SWAMP_MOCK_FTPS=29990 SWAMP_BAMBU_SSDP_PORT=22021 SWAMP_TEST_DIR="$HERE" "$OUT/e2e_test" "$REPO"

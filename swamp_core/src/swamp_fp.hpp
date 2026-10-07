@@ -5,6 +5,7 @@
 // reference is checked by test/fp_parity_test.cpp (histograms equal within float noise).
 // docs/adr/0003, docs/BENCHMARK.md.
 #include <vector>
+#include <charconv>
 #include <string>
 #include <cmath>
 #include <cstdint>
@@ -55,11 +56,16 @@ inline std::vector<double> parseStl(const std::string& buf) {
         p += 6;
         for (int k = 0; k < 3; k++) {
             while (p < buf.size() && std::isspace((unsigned char)buf[p])) p++;
-            char* end = nullptr;
-            double v = std::strtod(buf.c_str() + p, &end);
-            if (end == buf.c_str() + p) break;
+            // locale-independent: strtod follows the user's locale in a Qt program, so on a
+            // decimal-comma system "6.614115e+00" read as 6 (review 2026-10-07)
+            const char* b = buf.data() + p;
+            const char* e = buf.data() + buf.size();
+            if (b < e && *b == '+') b++;
+            double v = 0;
+            auto r = std::from_chars(b, e, v);
+            if (r.ec != std::errc() || r.ptr == b) break;
             out.push_back(v);
-            p = end - buf.c_str();
+            p = r.ptr - buf.data();
         }
     }
     out.resize(out.size() - out.size() % 9);

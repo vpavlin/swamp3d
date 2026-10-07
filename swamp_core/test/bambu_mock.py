@@ -119,11 +119,18 @@ def mqtt_session(raw):
         elif typ == 3:   # PUBLISH
             L = struct.unpack(">H", body[0:2])[0]; topic = body[2:2+L].decode(); msg = json.loads(body[2+L:])
             log(mqtt="publish", topic=topic, msg=msg)
+            if topic == "device/%s/mock" % SERIAL:   # test hook: {"busy": true} = running someone else's job
+                if msg.get("busy"): state.update(gcode_state="RUNNING", mc_percent=45, subtask_name="someone else's job")
+                else: state.update(gcode_state="IDLE", mc_percent=0, subtask_name="")
+                continue
             if topic != "device/%s/request" % SERIAL: continue
             if "pushing" in msg:
                 mqtt_publish(c, report, {"print": dict(state, command="push_status", nozzle_temper=27.5, bed_temper=24.0, mc_remaining_time=0)})
             elif msg.get("print", {}).get("command") == "project_file":
                 p = msg["print"]
+                if state["gcode_state"] == "RUNNING":   # busy: ignore the new job, keep reporting the old one
+                    mqtt_publish(c, report, {"print": dict(state, command="push_status")})
+                    continue
                 exists = os.path.exists(work + "/sd/" + p.get("file", "")) and p.get("url", "").endswith(p.get("file", "#"))
                 mqtt_publish(c, report, {"print": {"command": "project_file", "sequence_id": p.get("sequence_id"), "result": "success" if exists else "FAIL",
                                                    "reason": "" if exists else "file not found"}})

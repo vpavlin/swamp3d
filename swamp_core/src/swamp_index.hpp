@@ -114,7 +114,38 @@ inline std::map<std::string, json> build(const Catalog& c, const std::vector<Eve
     return shards;
 }
 
-// One query against the term shards a client holds. Every query word must match an indexed term
+// A term shard from an indexer, checked and cleaned before anything reads it: the indexer controls
+// the bytes, so wrong types must not throw (review 2026-10-07). Returns null if it isn't a term
+// shard at all; drops malformed terms and entries; caps sizes.
+inline json cleanTermShard(const json& in) {
+    if (!in.is_object() || str(in, "kind") != "terms") return nullptr;
+    json out{{"kind", "terms"}, {"v", VERSION}, {"terms", json::object()}, {"entries", json::object()}};
+    if (in.contains("entries") && in["entries"].is_object())
+        for (auto it = in["entries"].begin(); it != in["entries"].end() && out["entries"].size() < 100000; ++it) {
+            const json& e = it.value();
+            if (!e.is_object() || !isHex(it.key(), 32) || str(e, "m") != it.key()) continue;
+            json c{{"m", it.key()}, {"v", num(e, "v")}, {"t", clip(e, "t", 200)}, {"s", clip(e, "s", 140)}, {"c", clip(e, "c", 32)},
+                   {"a", clip(e, "a", 64)}, {"n", clip(e, "n", 60)}, {"l", clip(e, "l", 64)}, {"k", std::max(0LL, num(e, "k"))},
+                   {"mk", std::max(0LL, num(e, "mk"))}, {"at", num(e, "at")}, {"remix", flag(e, "remix")}, {"g", json::array()}, {"th", nullptr}};
+            for (const auto& g : arr(e, "g")) if (g.is_string() && c["g"].size() < 16) c["g"].push_back(g.get<std::string>().substr(0, 32));
+            if (e.contains("th") && e["th"].is_object() && isHex(str(e["th"], "sha"), 64)) {
+                json th{{"sha", str(e["th"], "sha")}, {"size", num(e["th"], "size")}, {"cids", json::array()}};
+                for (const auto& x : arr(e["th"], "cids")) if (x.is_string() && th["cids"].size() < 8 && x.get<std::string>().size() <= 128) th["cids"].push_back(x);
+                c["th"] = th;
+            }
+            out["entries"][it.key()] = c;
+        }
+    if (in.contains("terms") && in["terms"].is_object())
+        for (auto it = in["terms"].begin(); it != in["terms"].end(); ++it) {
+            if (!it.value().is_array() || it.key().empty() || it.key().size() > 40) continue;
+            json ids = json::array();
+            for (const auto& id : it.value()) if (id.is_string() && out["entries"].contains(id.get<std::string>()) && ids.size() < 10000) ids.push_back(id);
+            if (!ids.empty()) out["terms"][it.key()] = ids;
+        }
+    return out;
+}
+
+// One query against the term shards a client holds (cleaned with cleanTermShard). Every query word must match an indexed term
 // exactly or as a prefix (so "brace" finds "bracelet"); results ranked by how many words matched
 // in the title, then likes, then newest.
 inline json search(const std::string& query, const std::map<std::string, json>& termShards, const std::string& category, size_t limit) {
@@ -128,7 +159,7 @@ inline json search(const std::string& query, const std::map<std::string, json>& 
     for (const auto& w : q) {
         auto sh = termShards.find(shardKeyFor(w));
         std::set<std::string> ids;
-        if (sh != termShards.end() && sh->second.contains("terms")) {
+        if (sh != termShards.end() && sh->second.contains("terms") && sh->second["terms"].is_object()) {
             const auto& terms = sh->second["terms"].get_ref<const json::object_t&>();   // a sorted map
             for (auto it = terms.lower_bound(w); it != terms.end() && it->first.compare(0, w.size(), w) == 0; ++it)
                 for (const auto& id : it->second) {
@@ -152,9 +183,9 @@ inline json search(const std::string& query, const std::map<std::string, json>& 
         res.push_back(r);
     }
     std::sort(res.begin(), res.end(), [](const json& a, const json& b) {
-        if (a["_score"] != b["_score"]) return a["_score"].get<int>() > b["_score"].get<int>();
-        if (a["k"] != b["k"]) return a["k"].get<int>() > b["k"].get<int>();
-        return a["at"].get<long long>() > b["at"].get<long long>();
+        if (num(a, "_score") != num(b, "_score")) return num(a, "_score") > num(b, "_score");
+        if (num(a, "k") != num(b, "k")) return num(a, "k") > num(b, "k");
+        return num(a, "at") > num(b, "at");
     });
     for (size_t i = 0; i < res.size() && i < limit; i++) out.push_back(res[i]);
     return out;
