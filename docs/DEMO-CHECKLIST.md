@@ -30,12 +30,13 @@ empty catalogue.
 
 ### Public Basecamp repo
 
-- [ ] Publish `swamp_core` and `swamp` 0.5.2 to both apps.vpavlin.xyz surfaces, additively, with
-      `publish-public-basecamp.py`.
+- [ ] `[you]` say go, then **ask `jimmy-crib/publisher`** (shrooms `ask_agent`) to publish
+      `swamp_core` and `swamp` 0.5.2.
+  - Source: `url:http://files.pi5.office.mesh/swamp-0.5.2/`, or a GitHub release.
+  - First target `lan03`; `public-basecamp` only after the fresh-install test.
+  - Public targets wait for your approval on your phone. Never publish directly.
   - The dependencies are already public: loam_core 0.6.1, delivery_module 0.3.0, keycard 1.1.0,
     ble_mesh 0.2.1.
-  - Pushing needs write access to `vpavlin/logos-apps` and `vpavlin/logos-basecamp-modules`. `[you]`
-    if atlas has no key for them.
 - [ ] **Version trap.** The *documented* repo URL (`apps.vpavlin.xyz/logos-repo.json`) still lists
       **delivery_module 0.9.0**, the old fork. It outranks 0.3.0, so a Basecamp 0.3 user would get the
       fork, and Swamp (like every ported app) would never connect.
