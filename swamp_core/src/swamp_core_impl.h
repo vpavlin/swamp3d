@@ -64,6 +64,8 @@ public:
     // download (verified) + slice with the printer's default profile; then startPrint("yes")
     std::string preparePrint(std::string modelId, std::string version);
     std::string startPrint(std::string confirm);
+    // download the OrcaSlicer build Swamp is tested with (pinned, hash-checked) and use it for printing
+    std::string installSlicer();
     std::string cancelPrint();
 
 protected:
@@ -137,6 +139,11 @@ private:
     std::vector<swamp::json> m_bambuSlicers;
     swamp::json m_slicer;
     long long m_slicerAt = 0;
+    swamp::json m_slicerInstall;                      // {stage: downloading|unpacking|checking|done|failed, bytes, total, message, fix}
+    std::atomic<long long> m_slicerBytes{0};
+    swamp::json managedSlicer() const;
+    swamp::json slicerInstallState() const;
+    swamp::json slicerFix(const std::string& log, const swamp::json& slicer) const;
     std::string launchSlicer(const DownloadJob& j);
     swamp::json omissionsJson();
     swamp::json transportHealth();

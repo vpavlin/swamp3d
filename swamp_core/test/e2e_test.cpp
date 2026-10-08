@@ -39,7 +39,7 @@ static Peer* spawn(const std::string& name, bool hub = false) {
 }
 
 int main(int argc, char** argv) {
-    std::string sharedToolId;   // for the share-link test at the end
+    std::string sharedToolId;   // for the share-link test at the end: a model in Fashion, which every index carries
     QCoreApplication app(argc, argv);
     std::string repo = argc > 1 ? argv[1] : ".";
     root = std::string(getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") + "/swamp-e2e";
@@ -229,7 +229,31 @@ int main(int argc, char** argv) {
         CHECK(fs::exists(mockDir + "/sd/" + remote), "the sliced file is on the printer's SD card");
         CHECK(waitFor([&] { json st = json::parse(bob->core.printerStatus()); return st["printer"]["state"].is_object() && st["printer"]["state"]["state"] == "PREPARE"; }, 15000),
               "...and the printer moved to PREPARE");
+        // a slicer that can't start here: the job says what's wrong and offers to fix it, in plain steps
+        bob->call(bob->core.cancelPrint());
+        setenv("SWAMP_ORCA", (here + "/broken_orca.sh").c_str(), 1);
+        CHECK(json::parse(bob->core.preparePrint(mid, "1")).value("ok", false), "prepare with a broken slicer: accepted");
+        CHECK(waitFor([&] { job = bob->snap()["printJob"]; return job.is_object() && (job["stage"] == "ready" || job["stage"] == "failed"); }, 60000) && job["stage"] == "failed",
+              "...and it fails (" + job.dump() + ")");
+        json fix = job.value("fix", json());
+        CHECK(fix.is_object() && fix.value("title", "") == "This OrcaSlicer is built for older Linux" && fix.value("action", "") == "installSlicer",
+              "...saying the slicer is built for older Linux and offering to set up the one that works (" + fix.dump() + ")");
+        bool hasCmd = false; for (const auto& st : fix.value("steps", json::array())) hasCmd = hasCmd || st.value("command", "").find("curl -L") != std::string::npos;
+        CHECK(hasCmd, "...with the manual way as a command to copy");
+        CHECK(job.value("log", "").find("libwebkit2gtk-4.0.so.37") != std::string::npos, "...and the slicer's own output to copy");
+        bob->call(bob->core.cancelPrint());
         unsetenv("SWAMP_ORCA"); unsetenv("SWAMP_ORCA_PROFILES");
+        // the real thing: download (~140 MB), check, unpack and start OrcaSlicer 2.4.2 (opt-in: it's slow)
+        if (getenv("SWAMP_TEST_INSTALL_SLICER")) {
+            CHECK(json::parse(bob->core.installSlicer()).value("ok", false), "installSlicer: started");
+            json in;
+            CHECK(waitFor([&] { in = bob->snap()["slicerInstall"]; return in["stage"] == "done" || in["stage"] == "failed"; }, 15 * 60 * 1000) && in["stage"] == "done",
+                  "OrcaSlicer 2.4.2 is downloaded, hash-checked, unpacked and starts (" + in.dump() + ")");
+            CHECK(fs::exists(root + "/bob/data/slicers/orca-2.4.2/squashfs-root/AppRun"), "...unpacked into Swamp's own data (no FUSE needed)");
+            pump(100);
+            json ps = bob->snap()["printSlicer"];
+            CHECK(ps.is_object() && ps.value("managed", false), "...and printing uses it from now on (" + ps.dump() + ")");
+        }
     }
 
     // malformed and hostile frames: dropped and counted, the node keeps working (review C2)
@@ -386,7 +410,7 @@ int main(int argc, char** argv) {
             json gsA = json::parse(alice->core.globalSearch(json{{"q", "spinning"}}.dump()));
             CHECK(gsA["index"]["indexer"] != rogueAddr, "Alice's searches no longer use the rogue indexer");
         }
-        sharedToolId = tool.value("modelId", "");
+        sharedToolId = mid;   // the bracelet (Fashion): no test indexer leaves it out
         (void)toy; (void)tool;
     }
 
@@ -402,22 +426,21 @@ int main(int argc, char** argv) {
         CHECK(waitFor([&] { return json::parse(dave->core.listModels("{}"))["total"].get<int>() >= 2; }, 20000), "...and it catches up (has " << json::parse(dave->core.listModels("{}"))["total"] << ")");
     }
 
-    // share links: a node that follows neither the category nor has the model opens it from a link
+    // share links: a node that follows neither the model's category nor has the model opens it from a link
     {
-        std::string toolId = sharedToolId;
+        std::string sharedId = sharedToolId;
         setenv("SWAMP_CATEGORIES", "garden", 1);
         Peer* lena = spawn("lena");
         pump(1300);
         unsetenv("SWAMP_CATEGORIES");
         CHECK(!json::parse(lena->core.openLink("https://example.com/x")).value("ok", true), "a non-Swamp link is refused");
         CHECK(!json::parse(lena->core.openLink("swamp://model/zz12")).value("ok", true), "a damaged link is refused");
-        json ol = json::parse(lena->core.openLink("Wrench holder by Alice on Swamp: swamp://model/" + toolId + "?c=tools\n"));
-        CHECK(ol.value("ok", false) && ol["modelId"] == toolId && ol["category"] == "tools", "a shared message opens to its model id and category");
+        json ol = json::parse(lena->core.openLink("Geometric bracelet by Alice on Swamp: swamp://model/" + sharedId + "?c=other\n"));
+        CHECK(ol.value("ok", false) && ol["modelId"] == sharedId && ol["category"] == "other", "a shared message opens to its model id and category");
         json lm;
-        CHECK(waitFor([&] { lm = json::parse(lena->core.getModel(toolId)); return lm.value("ok", false); }, 15000), "...and the model opens on a node that doesn't follow Tools");
-        CHECK(lm["model"].value("title", "") == "Wrench holder", "...it's the shared model");
-        CHECK(json::parse(lena->core.listModels("{}"))["total"].get<int>() == 0, "...without adding Tools to her Browse");
-        // off the network again, so she doesn't change the timing of the tests below
+        CHECK(waitFor([&] { lm = json::parse(lena->core.getModel(sharedId)); return lm.value("ok", false); }, 15000), "...and the model opens on a node that doesn't follow its category");
+        CHECK(lm.contains("model") && lm["model"].value("modelId", "") == sharedId, "...it's the shared model (" + (lm.contains("model") ? lm["model"].value("title", "") : lm.dump()) + ")");
+        CHECK(json::parse(lena->core.listModels("{}"))["total"].get<int>() == 0, "...without adding that category to her Browse");
         auto& bn = FakeLoamBus::get().nodes; bn.erase(std::remove(bn.begin(), bn.end(), &lena->bus), bn.end());
         auto& sn = FakeStoreNet::get().nodes; sn.erase(std::remove(sn.begin(), sn.end(), &lena->store), sn.end());
     }

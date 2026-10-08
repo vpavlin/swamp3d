@@ -1,7 +1,7 @@
 {
   "name": "swamp_core",
   "display_name": "Swamp Core",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "type": "core",
   "interface": "universal",
   "category": "social",

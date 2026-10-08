@@ -55,6 +55,7 @@ Item {
     property var draftImages: []
     property var draftKeep: []        // files carried over from the previous version: {sha256, name, size}
     property var draftParentInfo: null // the version being remixed: {modelId, v, title, creatorName, licence}
+    property var draftBack: null      // where Remix / New version came from: {modelId, title, tab} - Back and Cancel return there
     property int shownImage: 0        // which picture of the open version is large
 
     readonly property var licences: ["CC-BY-4.0", "CC-BY-SA-4.0", "CC-BY-NC-4.0", "CC-BY-NC-SA-4.0", "CC-BY-ND-4.0", "CC-BY-NC-ND-4.0", "CC0-1.0", "MIT", "GPL-3.0-or-later"]
@@ -76,7 +77,7 @@ Item {
         for (var i = 0; i < 3 && typeof v === "string"; i++) { try { v = JSON.parse(v) } catch (e) { return null } }
         return (v && typeof v === "object") ? v : null
     }
-    function toast(msg, err) { root.toastMsg = msg; root.toastErr = !!err; toastTimer.restart() }
+    function toast(msg, err) { root.toastMsg = msg; root.toastErr = !!err; toastTimer.interval = err ? 15000 : 5000; toastTimer.restart() }
     function act(method, args, okMsg, onOk) {
         root.core(method, args, function (raw) {
             var r = root.parse(raw)
@@ -175,7 +176,15 @@ Item {
         root.draftParents = [{ modelId: info.modelId, v: info.v }]; root.draftParentInfo = info
         root.presetCategory(root.model.category)
         pTitle.text = "Remix of " + info.title; pLicence.currentIndex = Math.max(0, root.licences.indexOf(v.licence))
+        root.draftBack = { modelId: info.modelId, title: info.title, tab: root.tab }
         root.openId = ""; root.model = null; root.tab = "publish"
+    }
+    // leave a remix / new-version draft and go back to the model it started from
+    function leaveDraft() {
+        var back = root.draftBack
+        root.clearDraft(); root.draftBack = null
+        root.tab = back && back.tab !== "publish" ? back.tab : "browse"
+        if (back) root.openModel(back.modelId)
     }
     function startNewVersion() {
         var v = root.ver(); if (!v) return
@@ -188,6 +197,7 @@ Item {
         pLicence.currentIndex = Math.max(0, root.licences.indexOf(v.licence))
         // keep the files you already published; remove the ones you're replacing
         root.draftKeep = (v.files || []).filter(function (f) { return !!f.local }).map(function (f) { return { sha256: f.sha256, name: f.name, size: f.size } })
+        root.draftBack = { modelId: mid, title: root.model.title, tab: root.tab }
         root.openId = ""; root.model = null; root.tab = "publish"
     }
     // ND forbids derivatives; SA wants the same licence on the remix
@@ -210,6 +220,52 @@ Item {
         implicitHeight: inner.implicitHeight + 2 * root.sp
         color: root.cCard; radius: root.rad + 4; border.color: root.cLine
         ColumnLayout { id: inner; anchors.fill: parent; anchors.margins: root.sp; spacing: root.spS }
+    }
+    // a command to run: shown as-is, selectable, with a Copy button - nobody retypes a command
+    component CommandBox: Rectangle {
+        property string cmd: ""
+        Layout.fillWidth: true; visible: cmd !== ""
+        implicitHeight: Math.max(cmdT.implicitHeight, cmdCopy.implicitHeight) + 12
+        color: root.cInset; radius: root.rad; border.color: root.cLine
+        TextEdit { id: cmdT; readOnly: true; selectByMouse: true; textFormat: TextEdit.PlainText; wrapMode: TextEdit.WrapAnywhere
+            anchors.left: parent.left; anchors.right: cmdCopy.left; anchors.verticalCenter: parent.verticalCenter; anchors.margins: 8
+            text: parent.cmd; color: root.cText; font.family: "monospace"; font.pixelSize: 12 }
+        LogosButton { id: cmdCopy; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.rightMargin: 4
+            text: "Copy"; onClicked: root.copy(parent.cmd, "Command") }
+    }
+    // an error you can copy (to search for it, or to send it to someone)
+    component ErrorLine: RowLayout {
+        property string msg: ""
+        Layout.fillWidth: true; visible: msg !== ""; spacing: root.spS
+        TextEdit { Layout.fillWidth: true; readOnly: true; selectByMouse: true; textFormat: TextEdit.PlainText; wrapMode: TextEdit.Wrap
+            text: parent.msg; color: root.cErr; font.pixelSize: 13 }
+        LogosButton { text: "Copy"; onClicked: root.copy(parent.msg, "Error") }
+    }
+    // "here's what's wrong and what to do": {title, text, steps:[{text, command}], action}
+    component FixPanel: ColumnLayout {
+        property var fix: null
+        property var retry: null   // function: try the thing again once it's fixed
+        readonly property var inst: root.st.slicerInstall || null
+        readonly property string ist: inst ? (inst.stage || "") : ""
+        Layout.fillWidth: true; visible: !!fix; spacing: root.spS
+        T1 { Layout.fillWidth: true; text: parent.fix ? parent.fix.title : ""; color: root.cWarn }
+        T2 { Layout.fillWidth: true; text: parent.fix ? parent.fix.text : ""; color: root.cText }
+        RowLayout { spacing: root.spS; visible: !!parent.fix && parent.fix.action === "installSlicer"
+            LogosButton { text: "Set up OrcaSlicer 2.4.2 for me"; enabled: ["downloading", "unpacking", "checking"].indexOf(parent.parent.ist) < 0 && parent.parent.ist !== "done"
+                onClicked: root.act("installSlicer", [], "") }
+            LogosButton { visible: parent.parent.ist === "done" && !!parent.parent.retry; text: "Try again"; onClicked: parent.parent.retry() }
+        }
+        ProgressBar { Layout.fillWidth: true; visible: parent.ist === "downloading"; from: 0; to: parent.inst && parent.inst.total ? parent.inst.total : 1; value: parent.inst ? (parent.inst.bytes || 0) : 0 }
+        T2 { Layout.fillWidth: true; visible: !!parent.inst && parent.ist !== ""; color: parent.ist === "failed" ? root.cErr : (parent.ist === "done" ? root.cOk : root.cText2)
+            text: parent.inst ? (parent.inst.message || "") + (parent.ist === "downloading" && parent.inst.total ? "  " + Math.round(100 * (parent.inst.bytes || 0) / parent.inst.total) + " %" : "") : "" }
+        Repeater { model: parent.fix && parent.fix.steps ? parent.fix.steps : []
+            delegate: ColumnLayout { Layout.fillWidth: true; spacing: 4
+                T2 { Layout.fillWidth: true; text: modelData.text || "" }
+                CommandBox { cmd: modelData.command || "" } } }
+        Repeater { model: parent.inst && parent.inst.fix && parent.inst.fix.steps ? parent.inst.fix.steps : []   // after setting up: what's still missing
+            delegate: ColumnLayout { Layout.fillWidth: true; spacing: 4
+                T2 { Layout.fillWidth: true; text: modelData.text || "" }
+                CommandBox { cmd: modelData.command || "" } } }
     }
     component Field: TextField {
         // the core's value for this field; it fills the field only while you're not editing it
@@ -438,15 +494,20 @@ Item {
                                     LogosButton { Layout.preferredWidth: 120; visible: !!root.model && root.model.mine; text: "New version"; onClicked: root.startNewVersion() }
                                     LogosButton { Layout.preferredWidth: 100; visible: !!root.model && root.model.mine && !root.model.retracted; text: "Retract"; onClicked: retractDlg.open() }
                                 }
-                                T3 { Layout.fillWidth: true; visible: !!(root.ver() && root.ver().download && root.ver().download.error); color: root.cErr; text: root.ver() && root.ver().download ? (root.ver().download.error || "") : "" }
+                                ErrorLine { msg: root.ver() && root.ver().download ? (root.ver().download.error || "") : "" }
                             }
                         }
                     }
                     Card {
                         visible: !!root.model && !!root.st.printJob && root.st.printJob.modelId === root.model.modelId
                         T1 { text: "Print on " + (root.st.printJob ? root.st.printJob.printer : "") }
-                        T2 { Layout.fillWidth: true; text: root.st.printJob ? root.st.printJob.message : ""
-                             color: root.st.printJob && root.st.printJob.stage === "failed" ? root.cErr : (root.st.printJob && root.st.printJob.stage === "sent" ? root.cOk : root.cText2) }
+                        T2 { Layout.fillWidth: true; visible: !(root.st.printJob && root.st.printJob.stage === "failed"); text: root.st.printJob ? root.st.printJob.message : ""
+                             color: root.st.printJob && root.st.printJob.stage === "sent" ? root.cOk : root.cText2 }
+                        ErrorLine { msg: root.st.printJob && root.st.printJob.stage === "failed" ? (root.st.printJob.message || "") : "" }
+                        FixPanel { fix: root.st.printJob && root.st.printJob.stage === "failed" ? (root.st.printJob.fix || null) : null
+                            retry: function () { root.act("preparePrint", [root.model.modelId, String(root.ver().v)], "") } }
+                        LogosButton { visible: !!root.st.printJob && root.st.printJob.stage === "failed" && !!root.st.printJob.log; text: "Copy the slicer's output"
+                            onClicked: root.copy(root.st.printJob.log, "Slicer output") }
                         T2 { Layout.fillWidth: true; visible: !!root.st.printJob && !!root.st.printJob.estimate
                              text: root.st.printJob && root.st.printJob.estimate ? "About " + root.st.printJob.estimate.time + "  ·  " + (root.st.printJob.estimate.filamentG || "?") + " g of PLA (" + (root.st.printJob.estimate.filamentM || "?") + " m)  ·  " + (root.st.printJob.estimate.layers || "?") + " layers  ·  " + root.st.printJob.profile : "" }
                         ProgressBar { Layout.fillWidth: true; visible: !!root.st.printJob && root.st.printJob.stage === "uploading"; from: 0; to: 100; value: root.st.printJob ? (root.st.printJob.progress || 0) : 0 }
@@ -522,6 +583,7 @@ Item {
                 // ════ PUBLISH ════
                 Card {
                     visible: root.tab === "publish" && !root.openId
+                    LogosButton { visible: !!root.draftBack; text: "< Back to " + (root.draftBack ? root.draftBack.title : ""); onClicked: root.leaveDraft() }
                     T1 { text: root.draftFor ? "Publish a new version" : (root.draftParents.length ? "Publish a remix" : "Publish a model") }
                     T2 { Layout.fillWidth: true; visible: !!root.draftParentInfo; color: root.cText
                         text: root.draftParentInfo ? "Remixing " + root.draftParentInfo.title + " v" + root.draftParentInfo.v + " by " + root.draftParentInfo.creatorName + " (" + root.draftParentInfo.licence + "). The original is credited and linked." : "" }
@@ -540,7 +602,9 @@ Item {
                         Field { id: pTags; placeholderText: "comma separated, e.g. tool, organizer, gridfinity" }
                         T3 { text: "Category" }
                         ComboBox { id: pCategory; Layout.fillWidth: true; enabled: !root.draftFor
-                            model: (root.st.categories || []).map(function (c) { return c.label.replace(/&/g, "&&") })   // a lone & is a keyboard-mnemonic marker
+                            // a lone & is a keyboard-mnemonic marker in the list items, but not in the closed box
+                            model: (root.st.categories || []).map(function (c) { return c.label.replace(/&/g, "&&") })
+                            displayText: currentText.replace(/&&/g, "&")
                             ToolTip.visible: hovered && !enabled; ToolTip.text: "A model keeps the category it was created in" }
                         T3 { text: "Licence" }
                         ComboBox { id: pLicence; model: root.licences; Layout.fillWidth: true }
@@ -574,11 +638,11 @@ Item {
                                 root.act("publish", [JSON.stringify(d)], "Published - files are uploading in the background", function (r) {
                                     root.clearDraft()
                                     pTitle.text = ""; pSummary.text = ""; pDesc.text = ""; pTags.text = ""
-                                    root.tab = "mine"; root.openModel(r.modelId)
+                                    root.draftBack = null; root.tab = "mine"; root.openModel(r.modelId)
                                 })
                             }
                         }
-                        LogosButton { visible: !!root.draftFor || root.draftParents.length > 0; text: "Cancel"; onClicked: root.clearDraft() }
+                        LogosButton { visible: !!root.draftFor || root.draftParents.length > 0; text: "Cancel"; onClicked: root.leaveDraft() }
                     }
                 }
 
@@ -626,6 +690,8 @@ Item {
                         T1 { text: "Printer" }
                         T2 { Layout.fillWidth: true
                              text: "Print straight from Swamp to a Bambu Lab A1 or A1 mini on your network - no cloud, no account. The printer has to be in LAN-only mode with Developer Mode on (printer screen: Settings > Network/LAN; then restart it). That switches off Bambu's cloud printing while it's on. Needs OrcaSlicer 2.4+ or Bambu Studio. Only pick a printer you recognise: Swamp remembers its certificate on first contact and refuses an impostor later, but it can't tell which device is yours the first time." }
+                        T2 { Layout.fillWidth: true; visible: !!root.st.printSlicer; color: root.cOk; text: root.st.printSlicer ? "Slicing with " + root.st.printSlicer.name + "." : "" }
+                        FixPanel { fix: root.st.printSlicer ? null : (root.st.printSlicerFix || null) }
                         T2 { Layout.fillWidth: true; visible: !!root.st.printer; color: root.cText
                              text: root.st.printer ? root.st.printer.name + "  ·  " + root.st.printer.ip + "  ·  " + root.st.printer.serial + (root.st.printer.supported ? "" : "  ·  not supported yet") : "" }
                         T3 { Layout.fillWidth: true; visible: !!root.st.printer
@@ -698,7 +764,8 @@ Item {
         radius: root.rad
         color: root.toastErr ? Qt.rgba(0.9, 0.33, 0.3, 0.15) : Qt.rgba(0.37, 0.72, 0.35, 0.15)
         border.color: root.toastErr ? root.cErr : root.cOk
-        Text { id: toastT; textFormat: Text.PlainText; anchors.fill: parent; anchors.margins: 8; text: root.toastMsg; color: root.cText; wrapMode: Text.Wrap; font.pixelSize: 13 }
+        Text { id: toastT; textFormat: Text.PlainText; anchors.fill: parent; anchors.margins: 8; text: root.toastMsg + (root.toastErr ? "   (click to copy)" : ""); color: root.cText; wrapMode: Text.Wrap; font.pixelSize: 13 }
+        MouseArea { anchors.fill: parent; enabled: root.toastErr; cursorShape: Qt.PointingHandCursor; onClicked: root.copy(root.toastMsg, "Error") }
         }
 
 

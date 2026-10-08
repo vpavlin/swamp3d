@@ -12,6 +12,7 @@
 #include <QTimer>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QSysInfo>
 #include <QDir>
 #include <QObject>
 #include <openssl/evp.h>
@@ -28,7 +29,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.3";
+static const char* SWAMP_VERSION = "0.5.4";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -952,6 +953,177 @@ static bool isMeshFile(const std::string& name) {
     return e == "stl" || e == "3mf" || e == "obj" || e == "step" || e == "stp" || e == "amf";
 }
 
+// ---- the slicer Swamp can set up by itself --------------------------------------------------------
+// OrcaSlicer 2.4.2, the Ubuntu 24.04 AppImage (works on current distributions; the Ubuntu 22.04
+// build needs WebKitGTK 4.0, which they no longer ship). Pinned by hash, unpacked once into
+// <data>/slicers/ so it needs no FUSE, and preferred over anything else once it's there.
+struct OrcaBuild { const char* arch; const char* url; const char* sha; long long size; };
+static const OrcaBuild kOrcaBuilds[] = {
+    {"x86_64", "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.4.2/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage",
+     "d12fb8c8eac1aecd2dfb6377acd48f994f8fa439ed5292fa532dd82880f029fd", 137759224},
+    {"arm64", "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.4.2/OrcaSlicer_Linux_AppImage_Ubuntu2404_aarch64_V2.4.2.AppImage",
+     "e1a07275a25f176626c55a5df39e91bc4476d8c28ee4a3192ff758e29dd5c3ba", 135469576}};
+static const OrcaBuild* orcaBuild() {
+    std::string a = QSysInfo::currentCpuArchitecture().toStdString();
+    for (const auto& b : kOrcaBuilds) if (a == b.arch) return &b;
+    return nullptr;
+}
+json SwampCoreImpl::managedSlicer() const {
+    std::string run = m_dataDir + "/slicers/orca-2.4.2/squashfs-root/AppRun";
+    std::error_code ec;
+    if (!fs::exists(run, ec)) return nullptr;
+    return json{{"name", "OrcaSlicer 2.4.2 (set up by Swamp)"}, {"program", run}, {"args", json::array()}, {"managed", true}};
+}
+
+// The command that installs a system package on this distribution (from /etc/os-release).
+static std::string pkgInstall(const std::string& fedora, const std::string& debian, const std::string& arch, const std::string& suse) {
+    std::ifstream f("/etc/os-release");
+    std::string line, id, like;
+    while (std::getline(f, line)) {
+        auto val = [&](const char* k) { std::string v = line.substr(strlen(k)); v.erase(std::remove(v.begin(), v.end(), '"'), v.end()); return v; };
+        if (line.rfind("ID=", 0) == 0) id = val("ID=");
+        if (line.rfind("ID_LIKE=", 0) == 0) like = val("ID_LIKE=");
+    }
+    std::string all = " " + id + " " + like + " ";
+    auto is = [&](const char* d) { return all.find(std::string(" ") + d + " ") != std::string::npos; };
+    if (is("fedora") || is("rhel") || is("centos")) return "sudo dnf install -y " + fedora;
+    if (is("debian") || is("ubuntu")) return "sudo apt install -y " + debian;
+    if (is("arch")) return "sudo pacman -S --needed " + arch;
+    if (is("suse") || is("opensuse")) return "sudo zypper install -y " + suse;
+    return "";
+}
+
+// What to do about a slicer that didn't work, in plain steps. {title, text, steps:[{text, command}], action}
+// action "installSlicer" = Swamp can fix it itself with one button.
+json SwampCoreImpl::slicerFix(const std::string& log, const json& slicer) const {
+    const OrcaBuild* b = orcaBuild();
+    // only a library the loader couldn't find counts: Orca's normal output also names libwebkit2gtk-4.1
+    // ("no version information available (required by .../libwebkit2gtk-4.1.so.0)")
+    std::string missing;
+    for (size_t at = log.find("error while loading shared libraries: "); at != std::string::npos; at = log.find("error while loading shared libraries: ", at + 1)) {
+        size_t from = at + 38, to = log.find(':', from);
+        missing += " " + log.substr(from, to == std::string::npos ? std::string::npos : to - from);
+    }
+    auto lacks = [&](const char* lib) { return missing.find(lib) != std::string::npos; };
+    bool managed = slicer.is_object() && slicer.value("managed", false);
+    json steps = json::array();
+    auto manual = [&]() {   // the same thing by hand, for people who'd rather
+        if (!b) return;
+        steps.push_back({{"text", "Or do it by hand: download it into ~/Applications, then restart Basecamp."},
+                         {"command", std::string("mkdir -p ~/Applications && curl -L -o ~/Applications/OrcaSlicer-2.4.2.AppImage '") + b->url + "' && chmod +x ~/Applications/OrcaSlicer-2.4.2.AppImage"}});
+    };
+    if (slicer.is_null()) {
+        json fx{{"title", "Printing needs OrcaSlicer"}, {"action", b ? "installSlicer" : ""},
+                {"text", std::string("Swamp slices on your computer with OrcaSlicer, using the printer's own profile. ") +
+                         (b ? "It isn't installed yet. Swamp can download OrcaSlicer 2.4.2 (about 140 MB, from OrcaSlicer's GitHub releases, checked against a pinned hash) and set it up for you." : "Install OrcaSlicer 2.4 or newer, or Bambu Studio, then restart Basecamp.")}};
+        manual(); fx["steps"] = steps; return fx;
+    }
+    if (lacks("libwebkit2gtk-4.0")) {
+        json fx{{"title", "This OrcaSlicer is built for older Linux"}, {"action", b ? "installSlicer" : ""},
+                {"text", "The " + str(slicer, "name") + " you have is the Ubuntu 22.04 build. It needs WebKitGTK 4.0, which current distributions no longer ship, so installing packages won't fix it. The Ubuntu 24.04 build of OrcaSlicer 2.4.2 works. Swamp can download it and use it from now on (about 140 MB, hash-checked); your other slicer stays as it is."}};
+        manual(); fx["steps"] = steps; return fx;
+    }
+    if (lacks("libwebkit2gtk-4.1") || lacks("libjavascriptcoregtk-4.1")) {
+        std::string cmd = pkgInstall("webkit2gtk4.1", "libwebkit2gtk-4.1-0", "webkit2gtk-4.1", "libwebkit2gtk-4_1-0");
+        steps.push_back({{"text", cmd.empty() ? "Install WebKitGTK 4.1 (the package is usually called webkit2gtk4.1 or libwebkit2gtk-4.1-0) with your package manager, then try again." : "Run this in a terminal (it asks for your password), then try again:"},
+                         {"command", cmd}});
+        return json{{"title", "OrcaSlicer needs one system library"}, {"action", ""}, {"steps", steps},
+                    {"text", str(slicer, "name") + " needs WebKitGTK 4.1 from your system, and it isn't installed."}};
+    }
+    if (lacks("libfuse") || log.find("dlopen(): error loading libfuse") != std::string::npos || log.find("AppImages require FUSE") != std::string::npos) {
+        json fx{{"title", "This AppImage can't start without FUSE"}, {"action", b ? "installSlicer" : ""},
+                {"text", "AppImages need FUSE to run. Swamp can download OrcaSlicer 2.4.2 and unpack it, which needs no FUSE."}};
+        std::string cmd = pkgInstall("fuse-libs", "libfuse2t64", "fuse2", "libfuse2");
+        if (!cmd.empty()) steps.push_back({{"text", "Or install FUSE and keep your AppImage:"}, {"command", cmd}});
+        fx["steps"] = steps; return fx;
+    }
+    if (log.find("G92 E0") != std::string::npos || log.find("layer_gcode") != std::string::npos) {
+        json fx{{"title", "This slicer rejects the A1's own profile"}, {"action", b && !managed ? "installSlicer" : ""},
+                {"text", "Seen with OrcaSlicer 2.3 betas. OrcaSlicer 2.4.2 works; Swamp can download it and use it from now on."}};
+        manual(); fx["steps"] = steps; return fx;
+    }
+    if (!missing.empty()) {
+        std::string name = missing.substr(1);
+        json fx{{"title", "The slicer is missing a system library"}, {"action", b && !managed ? "installSlicer" : ""},
+                {"text", str(slicer, "name") + " needs " + name + ", which isn't on this system." + (b && !managed ? " Swamp can download the OrcaSlicer build it's tested with instead." : " Install the package that provides it, then try again.")}};
+        manual(); fx["steps"] = steps; return fx;
+    }
+    return nullptr;
+}
+
+json SwampCoreImpl::slicerInstallState() const {
+    json j = m_slicerInstall;
+    if (str(j, "stage") == "downloading") j["bytes"] = m_slicerBytes.load();
+    return j;
+}
+
+std::string SwampCoreImpl::installSlicer() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    std::string st = str(m_slicerInstall, "stage");
+    if (st == "downloading" || st == "unpacking" || st == "checking") return ok(json{{"install", m_slicerInstall}});
+    const OrcaBuild* b = orcaBuild();
+    if (!b) return fail("Swamp can't set up OrcaSlicer on this processor (" + QSysInfo::currentCpuArchitecture().toStdString() + ")");
+    std::string dir = m_dataDir + "/slicers", part = dir + "/OrcaSlicer-2.4.2.AppImage.part", img = dir + "/OrcaSlicer-2.4.2.AppImage", out = dir + "/orca-2.4.2";
+    m_slicerBytes = 0;
+    m_slicerInstall = json{{"stage", "downloading"}, {"total", b->size}, {"message", "Downloading OrcaSlicer 2.4.2..."}};
+    publishState();
+    std::string url = b->url, sha = b->sha;
+    std::atomic<long long>* bytes = &m_slicerBytes;
+    auto life = m_life;
+    auto setStage = [this, life](const char* stage, const char* msg) {
+        if (*life) onLoop([this, life, stage, msg] { if (!*life) return; std::lock_guard<std::recursive_mutex> l(m_mtx); m_slicerInstall["stage"] = stage; m_slicerInstall["message"] = msg; publishState(); });
+    };
+    runAsync([dir, part, img, out, url, sha, bytes, setStage] {
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        std::string have;
+        if (!(fs::exists(img, ec) && sha256File(img, have) && have == sha)) {
+            QString tool = QStandardPaths::findExecutable("curl");
+            QStringList args{"-fL", "--retry", "3", "-o", QString::fromStdString(part), QString::fromStdString(url)};
+            if (tool.isEmpty()) { tool = QStandardPaths::findExecutable("wget"); args = QStringList{"-O", QString::fromStdString(part), QString::fromStdString(url)}; }
+            if (tool.isEmpty()) return json{{"ok", false}, {"error", "Swamp needs curl or wget to download OrcaSlicer."}};
+            fs::remove(part, ec);
+            QProcess p; p.start(tool, args);
+            while (!p.waitForFinished(500)) {
+                if (p.state() == QProcess::NotRunning) break;
+                *bytes = (long long)fs::file_size(part, ec);
+                if (ec) ec.clear();
+            }
+            if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0)
+                return json{{"ok", false}, {"error", "The download failed: " + QString(p.readAllStandardError()).trimmed().right(200).toStdString()}};
+            std::string got;
+            if (!sha256File(part, got) || got != sha) { fs::remove(part, ec); return json{{"ok", false}, {"error", "The download doesn't match the expected hash, so Swamp won't run it."}}; }
+            fs::rename(part, img, ec);
+            if (ec) return json{{"ok", false}, {"error", "Couldn't save the download: " + ec.message()}};
+        }
+        setStage("unpacking", "Unpacking OrcaSlicer...");
+        fs::permissions(img, fs::perms::owner_exec, fs::perm_options::add, ec);
+        fs::remove_all(out, ec);
+        fs::create_directories(out, ec);
+        QProcess x; x.setWorkingDirectory(QString::fromStdString(out));
+        x.start(QString::fromStdString(img), {"--appimage-extract"});
+        x.waitForFinished(10 * 60 * 1000);
+        if (!fs::exists(out + "/squashfs-root/AppRun", ec)) return json{{"ok", false}, {"error", "Couldn't unpack the AppImage: " + QString(x.readAllStandardError()).trimmed().right(200).toStdString()}};
+        fs::remove(img, ec);   // the unpacked copy is what runs
+        setStage("checking", "Checking that it starts...");
+        QProcess t; t.start(QString::fromStdString(out + "/squashfs-root/AppRun"), {"--help"});
+        t.waitForFinished(120000);
+        std::string log = QString(t.readAllStandardOutput() + t.readAllStandardError()).toStdString();
+        return json{{"ok", true}, {"log", log.substr(log.size() > 4000 ? log.size() - 4000 : 0)}};
+    }, [this](json r) {
+        m_slicerAt = 0;   // rescan: the new one goes first
+        if (!r.value("ok", false)) {
+            m_slicerInstall = json{{"stage", "failed"}, {"message", r.value("error", "Setting up OrcaSlicer failed")}};
+        } else {
+            json fix = slicerFix(r.value("log", ""), managedSlicer());
+            if (fix.is_object()) m_slicerInstall = json{{"stage", "failed"}, {"message", "OrcaSlicer 2.4.2 is set up, but it can't start yet."}, {"fix", fix}};
+            else m_slicerInstall = json{{"stage", "done"}, {"message", "OrcaSlicer 2.4.2 is set up. Printing uses it from now on."}};
+        }
+        publishState();
+    });
+    return ok(json{{"install", m_slicerInstall}});
+}
+
 // Which slicer to open, best first: SWAMP_SLICER, then installed binaries, Flatpaks, AppImages in
 // the usual folders. {name, program, leading args}.
 json SwampCoreImpl::findSlicer() {
@@ -972,6 +1144,7 @@ std::vector<json> SwampCoreImpl::detectSlicers(bool bambuOnly) {
     std::vector<json> out;
     auto add = [&](json j) { std::string n = str(j, "name"); if (!bambuOnly || n.find("Orca") != std::string::npos || n.find("Bambu") != std::string::npos) out.push_back(j); };
     if (const char* env = getenv("SWAMP_SLICER")) if (*env) add(json{{"name", fs::path(env).filename().string()}, {"program", env}, {"args", json::array()}});
+    if (json m = managedSlicer(); m.is_object()) add(m);
     const std::vector<std::pair<std::string, std::vector<std::string>>> bins = {
         {"OrcaSlicer", {"orca-slicer", "OrcaSlicer", "orcaslicer"}},
         {"Bambu Studio", {"bambu-studio", "BambuStudio", "bambustudio"}},
@@ -992,6 +1165,8 @@ std::vector<json> SwampCoreImpl::detectSlicers(bool bambuOnly) {
                 if (fs::exists(dir, ec)) { add(json{{"name", name + " (Flatpak)"}, {"program", flatpak.toStdString()}, {"args", {"run", id}}}); break; }
             }
     }
+    // AppImages: the Ubuntu 24.04 builds first - the 22.04 ones need WebKitGTK 4.0, gone from current distributions
+    std::vector<json> imgs;
     const std::vector<std::pair<std::string, std::string>> images = {{"OrcaSlicer", "orca"}, {"Bambu Studio", "bambu"}, {"PrusaSlicer", "prusaslicer"}};
     for (const auto& [name, needle] : images)
         for (const char* sub : {"/Applications", "/Downloads", "/bin", "/opt", "/.local/bin"}) {
@@ -1002,9 +1177,12 @@ std::vector<json> SwampCoreImpl::detectSlicers(bool bambuOnly) {
                 std::string fn = de.path().filename().string(), low = fn;
                 for (auto& c : low) c = (char)std::tolower((unsigned char)c);
                 if (low.find(needle) != std::string::npos && low.size() > 9 && low.compare(low.size() - 9, 9, ".appimage") == 0)
-                    add(json{{"name", name + " (AppImage)"}, {"program", de.path().string()}, {"args", json::array()}});
+                    imgs.push_back(json{{"name", name + " (AppImage)"}, {"program", de.path().string()}, {"args", json::array()},
+                                        {"rank", low.find("2404") != std::string::npos ? 0 : low.find("2204") != std::string::npos ? 2 : 1}});
             }
         }
+    std::stable_sort(imgs.begin(), imgs.end(), [](const json& a, const json& b) { return a["rank"].get<int>() < b["rank"].get<int>(); });
+    for (auto& j : imgs) { j.erase("rank"); add(j); }
     return out;
 }
 
@@ -1157,6 +1335,7 @@ void SwampCoreImpl::publishState() {
 
 std::string SwampCoreImpl::snapshot() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    findSlicer();   // refreshes m_bambuSlicers (cached ~30 s) before printSlicer reads it
     auto pit = m_cat.profiles.find(m_id.address);
     json profile = pit == m_cat.profiles.end() ? json{{"name", ""}, {"bio", ""}} : pit->second;
     size_t visible = 0;
@@ -1168,7 +1347,8 @@ std::string SwampCoreImpl::snapshot() {
                 {"categories", categoriesJson()},
                 {"transport", transportHealth()},
                 {"slicer", findSlicer()},
-                {"printer", printerPublic()}, {"printJob", m_pjob}, {"discovering", m_discovering}, {"discovered", m_discovered},
+                {"printer", printerPublic()}, {"printJob", m_pjob}, {"slicerInstall", slicerInstallState()},
+                {"printSlicer", m_bambuSlicers.empty() ? json() : m_bambuSlicers[0]}, {"printSlicerFix", m_bambuSlicers.empty() ? slicerFix("", nullptr) : json()}, {"discovering", m_discovering}, {"discovered", m_discovered},
                 {"index", {{"indexer", m_indexer}, {"built", m_indexesBuilt}, {"known", m_cat.indexes.size()}, {"privacyDowngrades", m_privacyDowngrades},
                            {"omissions", omissionsJson()}, {"suspects", suspectsJson()}, {"excludedMine", excludedMineJson()}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
@@ -1219,10 +1399,11 @@ std::string SwampCoreImpl::listModels(std::string queryJson) {
     return ok(json{{"models", out}, {"total", hits.size()}, {"tags", tagList}});
 }
 
-// Share links: swamp://model/<modelId>?c=<category>. The id is enough to open a model that's in the
-// search index; the category also lets this node listen on that topic, which brings the model (and
-// its comments) even before an index includes it. Listening is for this session only: following a
-// category stays the user's choice in Me.
+// Share links: swamp://model/<modelId>?c=<category>. The id opens the model through the search
+// index (its record shard), like a search result. The category lets this node listen on that topic
+// for the session, so the model's new versions, comments and makes arrive live. (Catch-up on a
+// topic needs the whole topic's set, which only followers hold.) Following a category stays the
+// user's choice in Me.
 std::string SwampCoreImpl::openLink(std::string link) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     link = unquote(link);
@@ -1238,10 +1419,7 @@ std::string SwampCoreImpl::openLink(std::string link) {
     size_t q = rest.find("c=");
     if (q != std::string::npos && (rest[q - 1] == '?' || rest[q - 1] == '&')) cat = rest.substr(q + 2, rest.find_first_of("&# ", q) - q - 2);
     m_linked.insert(id);
-    if (knownCategory(cat) && !m_subs.count(cat)) {
-        ensureJoined(categoryTopic(cat));
-        if (m_ready) catchupOn(categoryTopic(cat));
-    }
+    if (knownCategory(cat) && !m_subs.count(cat)) ensureJoined(categoryTopic(cat));
     return json{{"ok", true}, {"modelId", id}, {"category", knownCategory(cat) ? cat : ""}}.dump();
 }
 
@@ -1848,7 +2026,7 @@ void SwampCoreImpl::beginSlice(const DownloadJob& j) {
     json prof = profilesFor(str(m_printer, "model"));
     std::string err;
     json slicer = orcaFor(prof, err);
-    if (slicer.is_null()) { m_pjob["stage"] = "failed"; m_pjob["message"] = err; publishState(); return; }
+    if (slicer.is_null()) { m_pjob["stage"] = "failed"; m_pjob["message"] = err; m_pjob["fix"] = slicerFix("", nullptr); publishState(); return; }
     std::string dataDir = m_dataDir;
     std::vector<std::string> meshes, projects;
     for (const auto& [sha, name] : j.files) {
@@ -1858,6 +2036,7 @@ void SwampCoreImpl::beginSlice(const DownloadJob& j) {
     }
     if (meshes.empty() && projects.empty()) { m_pjob["stage"] = "failed"; m_pjob["message"] = "This version has no model files to print"; publishState(); return; }
     m_pjob["stage"] = "slicing";
+    m_pjob["slicer"] = str(slicer, "name"); m_pjob["slicerProgram"] = str(slicer, "program");
     m_pjob["message"] = "Slicing with " + str(slicer, "name") + " (" + str(prof, "process") + ", " + str(prof, "filament") + ")...";
     publishState();
     std::string out = m_dataDir + "/print/" + newId().substr(0, 8), cfg = m_dataDir + "/orca-config";
@@ -1897,14 +2076,9 @@ void SwampCoreImpl::beginSlice(const DownloadJob& j) {
                          "--outputdir", QString::fromStdString(out), "--export-3mf", QString::fromStdString(remote)};
         for (const auto& in : inputs) args << QString::fromStdString(in);
         if (!run(args, log)) {
-            // say what to do, not just what the slicer printed (review 2026-10-07)
-            std::string hint;
-            if (log.find("libwebkit2gtk") != std::string::npos)
-                hint = str(orca, "name") + " can't start: it needs the system's WebKitGTK library (" + (log.find("4.0") != std::string::npos ? "libwebkit2gtk-4.0" : "libwebkit2gtk-4.1") + "). Install it, or use OrcaSlicer 2.4+ or Bambu Studio.";
-            else if (log.find("G92 E0") != std::string::npos || log.find("layer_gcode") != std::string::npos)
-                hint = "This " + str(orca, "name") + " build rejects the A1's own profile (seen with OrcaSlicer 2.3 betas). Use OrcaSlicer 2.4+ or Bambu Studio.";
-            std::string tail = log.substr(log.size() > 300 ? log.size() - 300 : 0);
-            return json{{"ok", false}, {"error", hint.empty() ? "Slicing failed: " + tail : hint + " (" + tail.substr(tail.size() > 120 ? tail.size() - 120 : 0) + ")"}};
+            // the view turns the log into plain steps (slicerFix); the whole tail is there to copy
+            std::string tail = log.substr(log.size() > 2000 ? log.size() - 2000 : 0);
+            return json{{"ok", false}, {"error", str(orca, "name") + " couldn't slice this model."}, {"log", tail}};
         }
         std::string file = out + "/" + remote, gcode;
         if (!fs::exists(file, ec)) return json{{"ok", false}, {"error", "The slicer produced no file"}};
@@ -1934,7 +2108,12 @@ void SwampCoreImpl::beginSlice(const DownloadJob& j) {
         return json{{"ok", true}, {"file", file}, {"remote", remote}, {"estimate", est}};
     }, [this](json r) {
         if (str(m_pjob, "stage") != "slicing") return;   // cancelled meanwhile
-        if (!r.value("ok", false)) { m_pjob["stage"] = "failed"; m_pjob["message"] = r.value("error", "Slicing failed"); }
+        if (!r.value("ok", false)) {
+            m_pjob["stage"] = "failed"; m_pjob["message"] = r.value("error", "Slicing failed");
+            m_pjob["log"] = r.value("log", "");
+            json used; for (const auto& c : m_bambuSlicers) if (str(c, "program") == str(m_pjob, "slicerProgram")) used = c;
+            m_pjob["fix"] = slicerFix(r.value("log", ""), used.is_object() ? used : json{{"name", str(m_pjob, "slicer")}});
+        }
         else {
             m_pjob["stage"] = "ready"; m_pjob["file"] = r["file"]; m_pjob["remote"] = r["remote"]; m_pjob["estimate"] = r["estimate"];
             m_pjob["message"] = "Sliced. Check the printer has PLA loaded and a clean plate, then start the print.";

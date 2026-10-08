@@ -52,6 +52,8 @@ public:
         if (m == "preparePrint") return core->preparePrint(s(0), s(1));
         if (m == "startPrint") return core->startPrint(s(0));
         if (m == "cancelPrint") return core->cancelPrint();
+        if (m == "openLink") return core->openLink(s(0));
+        if (m == "installSlicer") return core->installSlicer();
         return "{\"error\":\"Invalid response\"}";
     }
     Q_INVOKABLE void callModuleAsync(const QString& mod, const QString& method, const QVariantList& args, const QJSValue& cb, int) {
@@ -145,6 +147,10 @@ int main(int argc, char** argv) {
     r->setProperty("query", "");
     QMetaObject::invokeMethod(r, "openModel", Q_ARG(QVariant, QString::fromStdString(mid)));
     shot("model");
+    QMetaObject::invokeMethod(r, "startRemix"); shot("remix");   // a remix draft has a way back
+    QMetaObject::invokeMethod(r, "leaveDraft"); pump(2500);
+    fprintf(stderr, "REMIX-BACK %s\n", r->property("openId").toString() == QString::fromStdString(mid) ? "OK" : "FAILED");
+    if (r->property("openId").toString() != QString::fromStdString(mid)) g_errors++;
     r->setProperty("openId", ""); r->setProperty("tab", "publish"); shot("publish");
     r->setProperty("tab", "me"); shot("me");
     // typing into a field must survive the view's periodic refresh (it used to be reset to the saved value)
