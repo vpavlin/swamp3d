@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Swamp · 3D models nobody can take down</title>
+<meta name="description" content="Swamp is a peer-to-peer library of 3D-printable models. No company, no accounts, no takedown button. Built on the Logos tech stack; not endorsed by or affiliated with Logos.">
+<link rel="icon" href="img/duck.png">
+<style>
+  :root {
+    --mud: #0d1610; --mud2: #132017; --moss: #1c2e20; --reed: #2b4630; --slime: #8fd14f; --slime2: #b8f26b;
+    --duck: #e8c547; --beak: #f08a24; --text: #e7efe0; --text2: #b9c7ad; --text3: #839377; --warn: #f2b134;
+    --r: 18px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--mud); color: var(--text); font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif; overflow-x: hidden; }
+  a { color: var(--slime2); }
+  h1, h2, h3 { line-height: 1.15; margin: 0 0 .4em; }
+  h2 { font-size: clamp(1.7rem, 4vw, 2.6rem); letter-spacing: -.02em; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 22px; }
+  .muted { color: var(--text3); }
+
+  /* ── sticky, dripping header ── */
+  header { position: sticky; top: 0; z-index: 20; background: var(--slime); color: #10200c; }
+  header .wrap { display: flex; align-items: center; gap: 14px; height: 58px; }
+  header img { width: 38px; height: 38px; border-radius: 10px; }
+  header b { font-size: 1.25rem; letter-spacing: .02em; }
+  header nav { margin-left: auto; display: flex; gap: 18px; font-weight: 600; }
+  header nav a { color: #10200c; text-decoration: none; }
+  header nav a:hover { text-decoration: underline wavy; }
+  .drips { position: absolute; left: 0; right: 0; top: 100%; height: 46px; pointer-events: none; }
+  .drips span { position: absolute; top: -2px; width: var(--w); height: var(--h); background: var(--slime);
+    border-radius: 0 0 999px 999px; animation: drip var(--t) ease-in-out infinite; transform-origin: top; }
+  .drips span::after { content: ""; position: absolute; left: 50%; bottom: -9px; width: calc(var(--w) * .55); height: calc(var(--w) * .55);
+    margin-left: calc(var(--w) * -.275); border-radius: 50%; background: var(--slime); animation: drop var(--t) ease-in infinite; }
+  @keyframes drip { 0%, 100% { transform: scaleY(.55); } 50% { transform: scaleY(1); } }
+  @keyframes drop { 0%, 60% { opacity: 0; transform: translateY(0); } 70% { opacity: 1; } 100% { opacity: 0; transform: translateY(26px); } }
+  @media (max-width: 640px) { header nav a.opt { display: none; } }
+
+  /* ── hero ── */
+  .hero { position: relative; padding: 120px 0 90px; overflow: hidden;
+    background: radial-gradient(1200px 500px at 70% 110%, #23401f 0%, transparent 60%), radial-gradient(800px 400px at 10% 0%, #17271a 0%, transparent 70%), var(--mud); }
+  .hero .wrap { display: grid; grid-template-columns: 1.25fr .75fr; gap: 40px; align-items: center; }
+  .hero h1 { font-size: clamp(2.6rem, 7vw, 5.2rem); letter-spacing: -.04em; }
+  .hero h1 em { font-style: normal; color: var(--slime); text-shadow: 0 0 28px rgba(143, 209, 79, .35); }
+  .hero p.lede { font-size: 1.25rem; color: var(--text2); max-width: 34em; }
+  .hero .duck { width: 100%; max-width: 340px; justify-self: center; border-radius: 48px; animation: bob 4s ease-in-out infinite;
+    box-shadow: 0 40px 80px rgba(0, 0, 0, .55), 0 0 0 10px var(--moss); }
+  @keyframes bob { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-14px) rotate(2deg); } }
+  .cta { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 28px; }
+  .btn { display: inline-block; padding: 13px 22px; border-radius: 999px; font-weight: 700; text-decoration: none; border: 2px solid var(--slime); color: var(--slime2); }
+  .btn.solid { background: var(--slime); color: #10200c; }
+  .btn:hover { transform: translateY(-2px) rotate(-1deg); }
+  @media (max-width: 820px) { .hero .wrap { grid-template-columns: 1fr; } .hero .duck { max-width: 220px; } }
+
+  /* bubbles from the bottom of the bog */
+  .bubbles span { position: absolute; bottom: -40px; width: var(--s); height: var(--s); left: var(--x); border-radius: 50%;
+    border: 2px solid rgba(184, 242, 107, .45); background: rgba(184, 242, 107, .06); animation: rise var(--t) linear infinite; animation-delay: var(--d); }
+  @keyframes rise { 0% { transform: translateY(0) translateX(0); opacity: 0; } 10% { opacity: 1; } 50% { transform: translateY(-45vh) translateX(18px); }
+    100% { transform: translateY(-95vh) translateX(-10px); opacity: 0; } }
+
+  /* ── banner ── */
+  .banner { background: repeating-linear-gradient(-45deg, #2a2410 0 18px, #221d0c 18px 36px); border-block: 2px solid var(--warn); color: #f7e3b0; }
+  .banner .wrap { padding: 16px 22px; display: flex; gap: 14px; align-items: center; }
+  .banner b { color: var(--warn); }
+
+  section { padding: 88px 0; position: relative; }
+  section.alt { background: var(--mud2); }
+  .steps { padding-left: 1.2em; } .steps li { margin: 10px 0; color: var(--text2); }
+  .repo { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 8px 0 4px; }
+  .repo code { background: var(--moss); border: 1px solid var(--reed); border-radius: 10px; padding: 8px 12px; color: var(--slime2); word-break: break-all; }
+  .repo button { cursor: pointer; padding: 8px 14px; border-radius: 999px; border: 2px solid var(--slime); background: none; color: var(--slime2); font-weight: 700; }
+  .grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 28px; }
+  .card { background: var(--moss); border: 1px solid var(--reed); border-radius: var(--r); padding: 22px 22px 18px; position: relative; }
+  .card h3 { font-size: 1.15rem; color: var(--slime2); }
+  .card p { margin: 0; color: var(--text2); font-size: .98rem; }
+  .card .icon { width: 34px; height: 34px; display: block; margin-bottom: 10px; color: var(--duck); }
+  .lily { position: absolute; width: 90px; height: 90px; border-radius: 50%; background: #2f5a2a; opacity: .35;
+    clip-path: polygon(50% 50%, 100% 30%, 100% 100%, 0 100%, 0 0, 100% 0, 100% 22%); pointer-events: none; }
+
+  .why { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 22px; margin-top: 30px; }
+  .why div { border-left: 4px solid var(--slime); padding: 2px 0 2px 16px; }
+  .why b { display: block; font-size: 1.15rem; color: var(--duck); }
+  .why span { color: var(--text2); }
+
+  /* ── screenshots ── */
+  .shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; margin-top: 28px; }
+  figure { margin: 0; background: var(--moss); border: 1px solid var(--reed); border-radius: var(--r); overflow: hidden; }
+  figure img { width: 100%; display: block; border-bottom: 1px solid var(--reed); cursor: zoom-in; }
+  figcaption { padding: 10px 14px; color: var(--text2); font-size: .92rem; }
+  .zoom { position: fixed; inset: 0; background: rgba(5, 10, 6, .92); display: none; align-items: center; justify-content: center; z-index: 50; cursor: zoom-out; padding: 24px; }
+  .zoom img { max-width: 100%; max-height: 100%; border-radius: 12px; }
+
+  /* ── faq ── */
+  details { background: var(--moss); border: 1px solid var(--reed); border-radius: 14px; padding: 14px 18px; margin: 12px 0; }
+  summary { cursor: pointer; font-weight: 700; color: var(--slime2); }
+  details p { color: var(--text2); margin: 10px 0 2px; }
+
+  .road { counter-reset: r; list-style: none; padding: 0; margin: 26px 0 0; }
+  .road li { counter-increment: r; display: flex; gap: 14px; align-items: baseline; padding: 10px 0; border-bottom: 1px dashed var(--reed); }
+  .road li::before { content: counter(r); font-weight: 800; color: #10200c; background: var(--slime); border-radius: 50%; min-width: 30px; height: 30px; display: inline-grid; place-items: center; }
+  .road .done::before { content: "✓"; background: var(--duck); }
+  .road small { color: var(--text3); }
+
+  .disclaimer { border: 2px dashed var(--reed); border-radius: var(--r); padding: 18px 20px; color: var(--text2); margin-top: 26px; }
+  footer { padding: 48px 0 70px; background: #091008; color: var(--text3); font-size: .92rem; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 26px; align-items: center; }
+  footer img { width: 28px; border-radius: 8px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <img src="img/duck.png" alt="">
+    <b>SWAMP</b>
+    <nav>
+      <a href="#how">How</a>
+      <a class="opt" href="#bog">Look</a>
+      <a class="opt" href="#unregulated">Unregulated?</a>
+      <a href="#status">Status</a>
+      <a href="#install">Get it</a>
+    </nav>
+  </div>
+  <div class="drips" id="drips" aria-hidden="true"></div>
+</header>
+
+<div class="hero">
+  <div class="bubbles" id="bubbles" aria-hidden="true"></div>
+  <div class="wrap">
+    <div>
+      <h1>3D models <em>nobody</em> can take down.</h1>
+      <p class="lede">Swamp is a peer-to-peer library of printable models. No company in the middle, no accounts,
+        no takedown button, no algorithm deciding what you see. Just people, files and a lot of mud.</p>
+      <p class="lede" style="font-size:1.05rem">Publish a model and it sticks. Search everything without anyone
+        watching what you search for. Find out who really made the thing you're about to print.</p>
+      <div class="cta">
+        <a class="btn solid" href="#how">Wade in</a>
+        <a class="btn" href="#install">Get it</a>
+        <a class="btn" href="#bog">See the bog</a>
+      </div>
+    </div>
+    <img class="duck" src="img/duck.png" alt="Swamp's mascot: a 3D-printed duck, layer lines and all, sitting in a swamp between the reeds">
+  </div>
+</div>
+
+<div class="banner">
+  <div class="wrap">
+    <img src="img/duck.png" alt="" style="width:40px;border-radius:10px">
+    <span><b>Prototype.</b> It works on our machines and on the Logos test network. It has not met the real world,
+      it has no audit, and the test network resets. Every file is hash-checked, so it shouldn't eat your STLs, but
+      we wouldn't bet the farm. Or the pond.</span>
+  </div>
+</div>
+
+<section id="why">
+  <div class="wrap">
+    <h2>Why a swamp?</h2>
+    <p class="muted" style="max-width:44em">Model sites live in towers: one company, one database, one moderation
+      team, one bad quarter away from a paywall. Swamps don't have towers. They're messy, they're everywhere at once,
+      and things that live there are very hard to get rid of.</p>
+    <div class="why">
+      <div><b>Sticky</b><span>Published versions are signed, content-addressed and mirrored by anyone who wants
+        to. You can't edit history and nobody can quietly delete it. Retract your own model and it hides, but it
+        doesn't vanish from the people who have it.</span></div>
+      <div><b>Murky</b><span>Browse the categories you follow from your own copy: offline, and nobody learns what
+        you look at. Search everything else by fetching only the index piece your query needs (privately over a mixnet, once the network's mixnet works).</span></div>
+      <div><b>No landlord</b><span>No accounts. Your identity is a key on your device. Anyone can run a hub, and no
+        hub is in charge.</span></div>
+      <div><b>Teeming</b><span>Remixes link to what they remix. Makes come with photos. Comments, likes, versions.
+        Everything Printables has, minus the company.</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="alt">
+  <div class="lily" style="right:6%;top:30px"></div><div class="lily" style="right:12%;top:110px;transform:scale(.6) rotate(80deg)"></div>
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p class="muted" style="max-width:46em">A desktop app for Logos Basecamp. Under the hood: signed event logs over
+      Logos Messaging, files in Logos Storage, and soon priority proofs anchored on LEZ, the Logos execution zone.</p>
+    <div class="grid">
+      <div class="card"><svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 10l11-5 11 5v12l-11 5-11-5z"/><path d="M5 10l11 5 11-5M16 15v12"/></g></svg><h3>Publish</h3><p>Drop in your STL and photos. Swamp hashes every
+        file, renders a thumbnail and takes a shape fingerprint. The listing goes out at once, and files upload in the
+        background. Versions are immutable: improve it, publish v2.</p></div>
+      <div class="card"><svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="16" cy="22" rx="12" ry="5"/><path d="M16 21c-4-3-5-8-3-12 2 3 3 7 3 12zM16 21c4-3 5-8 3-12-2 3-3 7-3 12zM16 21c-6-1-9-4-10-8 4 0 8 3 10 8zM16 21c6-1 9-4 10-8-4 0-8 3-10 8z"/></g></svg><h3>Follow categories</h3><p>Your node keeps a full copy of the
+        categories you follow, like Tools, Toys and Gridfinity, and nothing else. Fast, offline and private, and it
+        doesn't need a data centre.</p></div>
+      <div class="card"><svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="13" r="8"/><path d="M19 19l8 8"/></g></svg><h3>Search everywhere</h3><p>Indexing hubs publish signed,
+        deterministic index snapshots. You fetch only the piece your query needs and rank results
+        yourself. Two honest indexers produce identical bytes, so leaving something out shows.</p></div>
+      <div class="card"><svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 25c4-3 22-3 26 0"/><path d="M15 24c0-6 1-11 3-15M18 9c-4-2-8-1-10 2M18 9c3-3 7-3 9-1M18 9c1 3 0 6-2 8"/></g></svg><h3>Hubs, not landlords</h3><p>Anyone can run a hub to keep
+        files alive and answer searches. A hub may refuse content, but it must say what it drops and why.
+        Declared exclusion is a policy, silent omission is provable cheating, and you pick your hubs.</p></div>
+      <div class="card"><svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4c0 8 12 8 12 16s-12 0-12 8M22 4c0 8-12 8-12 16s12 0 12 8"/><path d="M12 9h8M12 23h8M14 16h4"/></g></svg><h3>Stolen models</h3><p>Every version carries a shape
+        fingerprint from day one. Next up: "possible copy of X by Y, published earlier", with evidence your client
+        re-checks itself. Labels inform. They never delete anything.</p></div>
+      <div class="card"><svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6h20v18H6z"/><path d="M6 11h20M14 11v6l2 2 2-2v-6"/><path d="M10 24h12"/></g></svg><h3>Remix, make, repeat</h3><p>Remixes credit and link the
+        original (and warn you when its licence says no derivatives). Post your make with a photo. Download is
+        verified byte for byte, then it goes into your slicer.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="bog">
+  <div class="wrap">
+    <h2>A look into the bog</h2>
+    <p class="muted">Real screenshots from Basecamp 0.3.1, synced over the Logos test network. Click to enlarge.</p>
+    <div class="shots">
+      <figure><img src="img/browse.png" alt="Browse: a grid of models with thumbnails"><figcaption>Browse the categories you follow</figcaption></figure>
+      <figure><img src="img/search.png" alt="Search results from the index"><figcaption>"Everywhere": results from an index snapshot, plus how many indexers agree</figcaption></figure>
+      <figure><img src="img/model.png" alt="A remix with its parent link and photo gallery"><figcaption>A remix links its original, with a gallery of the creator's photos</figcaption></figure>
+      <figure><img src="img/make.png" alt="A make posted with a photo"><figcaption>Makes: "I printed it, here's how it went"</figcaption></figure>
+      <figure><img src="img/categories.png" alt="Category subscriptions"><figcaption>Pick what lives in your corner of the swamp</figcaption></figure>
+      <figure><img src="img/retract.png" alt="Retract dialog"><figcaption>Retract your own model: it hides, with your reason</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="unregulated" class="alt">
+  <div class="wrap">
+    <h2>"Unregulated", honestly</h2>
+    <p class="muted" style="max-width:46em">There is no central moderator, and there never will be. That doesn't
+      mean anything goes. It means nobody can decide for everyone.</p>
+    <details open><summary>Who decides what I see?</summary>
+      <p>You do. Your client verifies every signature and ranks everything locally. Hubs choose what they carry and
+        must publish their exclusion lists. Labelers, coming later, are things you subscribe to, not authorities.</p></details>
+    <details><summary>Can a hub censor a model?</summary>
+      <p>It can refuse to carry it, and it has to say so. It can't forge entries, can't edit them and can't rank
+        them for you. If it signs an index that silently drops a model published before that index, the hub has
+        signed the proof of its own cheating, and clients stop trusting it. If every hub colludes, someone starts a
+        new hub: it's one command.</p></details>
+    <details><summary>What about stolen designs?</summary>
+      <p>That's the problem we care most about. Exact copies are detected 95-100% of the time in our benchmark;
+        edited copies are still hard and we say so. The plan is evidence-carrying labels plus "who published first"
+        proofs anchored on chain. We can't stop theft, but we can make sure people can find the original.</p></details>
+    <details><summary>Is it legal?</summary>
+      <p>Swamp is a tool. What you publish, carry or print is your business, under your local laws.</p></details>
+    <details><summary>Phones?</summary>
+      <p>Later. 3D printing happens at a desk; the desktop app comes first and has to be good.</p></details>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Get into the swamp</h2>
+    <p>Swamp runs inside <a href="https://github.com/logos-co/logos-basecamp">Logos Basecamp</a> 0.3, on Linux (x86-64).</p>
+    <ol class="steps">
+      <li>Install <b>Basecamp 0.3.1</b>. A separate profile keeps your other apps out of the experiment:
+        <code>HOME=$HOME/swamp-profile ./Basecamp-0.3.1.AppImage</code></li>
+      <li>In Basecamp, open the <b>Package Manager</b>, add this repository and install <b>Swamp</b>. Its
+        dependencies come along.
+        <div class="repo"><code id="repo">https://apps.vpavlin.xyz/basecamp/logos-repo.json</code>
+          <button onclick="navigator.clipboard.writeText(document.getElementById('repo').textContent);this.textContent='Copied'">Copy</button></div></li>
+      <li>Open Swamp, set a name under <b>Me</b>, pick the categories you care about and wade in.</li>
+      <li>To print, install <b>OrcaSlicer 2.4+</b> or <b>Bambu Studio</b>. "Open in slicer" works with any
+        printer. A Bambu Lab <b>A1 / A1 mini</b> in LAN-only + Developer Mode can print straight from Swamp,
+        over your own network.</li>
+      <li>Got a <code>swamp://model/...</code> link from someone? Paste it into the search box.</li>
+    </ol>
+    <div class="cta">
+      <a class="btn solid" href="https://github.com/vpavlin/swamp3d">Source on GitHub</a>
+      <a class="btn" href="https://github.com/vpavlin/swamp3d/issues">Report a bug</a>
+    </div>
+  </div>
+</section>
+
+<section id="status" class="alt">
+  <div class="wrap">
+    <h2>Where the swamp is at</h2>
+    <ol class="road">
+      <li class="done"><span>Shape fingerprints and a benchmark. <small>Whole-object copies detected 95-100% at 0.1% false positives.</small></span></li>
+      <li class="done"><span>Publish, browse, versions, remixes, makes, comments, likes, verified downloads. <small>Tested headless and in Basecamp 0.3.1 on the Logos test network.</small></span></li>
+      <li class="done"><span>Follow categories instead of mirroring everything. Lazy pictures.</span></li>
+      <li class="done"><span>Global search over signed index snapshots. <small>Proven on the Logos test network: found, opened and downloaded a model from a category the node doesn't follow. Private (mixnet) fetching is built, but switched off until the network's mixnet works.</small></span></li>
+      <li class="done"><span>Creators audit the indexers. <small>A hub that silently leaves your model out gets caught with its own signature; a declared exclusion is shown as policy.</small></span></li>
+      <li class="done"><span>Open in your slicer, or print straight to a Bambu Lab A1 over your LAN. <small>Sliced on your machine with the printer's own profile; geometry only, so nobody else's G-code reaches your printer. No cloud, no account.</small></span></li>
+      <li class="done"><span>Share links: send someone a model, they paste it into Swamp.</span></li>
+      <li><span>An always-on hub, so two people behind home routers can share files.</span></li>
+      <li><span>Copy labels for exact and whole-object copies.</span></li>
+      <li><span>"Who published first" anchored on LEZ.</span></li>
+      <li><span>Live anonymous query hubs, and sharing evidence between nodes.</span></li>
+      <li><span>Edited-copy detection, labelers and disputes. Tips.</span></li>
+    </ol>
+    <p class="disclaimer"><strong>Not endorsed by or affiliated with Logos.</strong> Swamp is an independent
+      experiment that is built on the Logos tech stack; that is the whole relationship. Nothing here speaks for
+      Logos, and Logos doesn't operate, moderate or vouch for anything in the swamp.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <img src="img/duck.png" alt="">
+    <span>Swamp · an independent experiment, built on the Logos tech stack · not endorsed by or affiliated with Logos</span>
+    <span><a href="https://github.com/vpavlin/swamp3d" style="color:inherit">GitHub</a> · MIT / Apache-2.0 · Mind the mosquitoes.</span>
+  </div>
+</footer>
+
+<div class="zoom" id="zoom"><img alt=""></div>
+
+<script>
+  // slime drips along the header
+  const drips = document.getElementById('drips');
+  for (let i = 0; i < 26; i++) {
+    const d = document.createElement('span');
+    const w = 10 + Math.random() * 22;
+    d.style.cssText = `left:${i * 4 + Math.random() * 3}%;--w:${w}px;--h:${10 + Math.random() * 30}px;--t:${3 + Math.random() * 4}s`;
+    drips.appendChild(d);
+  }
+  // bubbles rising out of the bog
+  const bub = document.getElementById('bubbles');
+  for (let i = 0; i < 18; i++) {
+    const b = document.createElement('span');
+    b.style.cssText = `--s:${8 + Math.random() * 26}px;--x:${Math.random() * 100}%;--t:${7 + Math.random() * 9}s;--d:-${Math.random() * 12}s`;
+    bub.appendChild(b);
+  }
+  // click a screenshot to enlarge it
+  const zoom = document.getElementById('zoom');
+  document.querySelectorAll('figure img').forEach(img => img.addEventListener('click', () => {
+    zoom.querySelector('img').src = img.src; zoom.style.display = 'flex';
+  }));
+  zoom.addEventListener('click', () => zoom.style.display = 'none');
+</script>
+</body>
+</html>
