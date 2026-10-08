@@ -51,6 +51,9 @@ and without deleting anything.
 ## Building and testing
 
 - **Packages:** `nix build .#lgx-portable` in `swamp_core/` and in `module/` (logos-module-builder 0.3.1).
+  Linux arm64: push a tag `arm64-*`; `.github/workflows/arm64.yml` builds both on a GitHub ARM runner
+  (and checks for ARMv8.0-unsafe LSE atomics) and attaches them to a release. Merge them into the
+  x86-64 packages with `lgx merge` (published packages carry both platforms).
 - **Tests:** `swamp_core/test/run-tests.sh` runs catalogue, index, fingerprint parity (C and cs_CZ
   locale), printer client (against a fake Bambu printer) and end-to-end checks.
   - Needs g++, OpenSSL, Qt6Core, nlohmann-json (`json-devel` on Fedora), python3 and node.
