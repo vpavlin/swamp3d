@@ -1,3 +1,0 @@
-error_code 65550, description: Failed to detect any supported platform
-glfwInit return error, Error code: 65550, Error: Failed to detect any supported platform
-OpenGL context unavailable; skip thumbnail generating

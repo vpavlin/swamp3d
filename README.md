@@ -59,3 +59,7 @@ and without deleting anything.
 
 Start with `notes/01`–`05a`, `RESEARCH.md` and `docs/THEFT.md`. The decisions live in `docs/adr/`,
 the protocol in `docs/SPEC.md`, and the plan in `docs/ROADMAP.md`.
+
+## Licence
+
+MIT, see `LICENSE`.
