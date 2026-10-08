@@ -10,6 +10,7 @@ endif()
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/metadata.json" METADATA_JSON)
 string(JSON MODULE_NAME GET ${METADATA_JSON} name)
 find_package(OpenSSL REQUIRED)
+find_package(ZLIB REQUIRED)
 logos_module(
     NAME ${MODULE_NAME}
     SOURCES
@@ -18,6 +19,9 @@ logos_module(
         src/swamp_catalog.hpp
         src/swamp_fp.hpp
         src/swamp_thumb.hpp
+        src/swamp_3mf.hpp
+        src/swamp_bambu.hpp
+        src/swamp_index.hpp
         src/logos_sync/catchup.hpp
         src/logos_sync/crypto.hpp
         src/logos_sync/event.hpp
@@ -25,6 +29,6 @@ logos_module(
         src/logos_sync/reconcile.hpp
         src/logos_sync/signing.hpp
     INCLUDE_DIRS src
-    FIND_PACKAGES OpenSSL
-    LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto
+    FIND_PACKAGES OpenSSL ZLIB
+    LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB
 )

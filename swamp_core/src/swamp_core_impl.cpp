@@ -4,6 +4,7 @@
 #include "swamp_fp.hpp"
 #include "swamp_index.hpp"
 #include "swamp_bambu.hpp"
+#include "swamp_3mf.hpp"
 #include <thread>
 #include <cmath>
 #define SWAMP_THUMB_QT 1   // the module links Qt Core: compress thumbnails with qCompress
@@ -27,7 +28,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.2";
+static const char* SWAMP_VERSION = "0.5.3";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -57,7 +58,7 @@ static constexpr long long kManifestMaxAgeMs = 30LL * 24 * 3600 * 1000;   // an 
 static constexpr long long kSilentTopicMs = 10LL * 60 * 1000;   // posting with no answer this long = "may not reach anyone"
 static constexpr long long kRecordRefreshMs = 60000;   // refresh a model held only through the index
 static constexpr int kPrivateRounds = 2;            // failed private (Mix) rounds before a shard fetch goes plain
-static constexpr int kJobRounds = 3;                 // full passes over a file's CIDs before a download fails
+static constexpr int kJobRounds = 5;                 // full passes over a file's CIDs before a download fails (~8 min: a fresh upload can take 3+ min to be findable)
 
 // ---- helpers --------------------------------------------------------------------------------
 static std::string b64std(const std::string& s) {
@@ -481,7 +482,9 @@ void SwampCoreImpl::handleFrame(const std::string& topic, const json& f, bool li
             if (!eventFrom(j, e)) { m_rxBad++; continue; }
             // on a topic we only send to (a model we opened, outside our categories), keep what's
             // about models we already hold - not the whole category
-            if (!subscribed && (e.type == "model.create" || !m_cat.models.count(str(e.payload, "modelId")))) continue;
+            // - or a model someone sent us a link to
+            const std::string mid = str(e.payload, "modelId");
+            if (!subscribed && !m_linked.count(mid) && (e.type == "model.create" || !m_cat.models.count(mid))) continue;
             if (ingest(e)) m_rxEvents++;
         }
     } else if (wellFormedCatchup(f)) {
@@ -1216,6 +1219,32 @@ std::string SwampCoreImpl::listModels(std::string queryJson) {
     return ok(json{{"models", out}, {"total", hits.size()}, {"tags", tagList}});
 }
 
+// Share links: swamp://model/<modelId>?c=<category>. The id is enough to open a model that's in the
+// search index; the category also lets this node listen on that topic, which brings the model (and
+// its comments) even before an index includes it. Listening is for this session only: following a
+// category stays the user's choice in Me.
+std::string SwampCoreImpl::openLink(std::string link) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    link = unquote(link);
+    while (!link.empty() && isspace(static_cast<unsigned char>(link.back()))) link.pop_back();
+    size_t at = link.find("swamp://model/");
+    if (at == std::string::npos) return fail("Not a Swamp link (they look like swamp://model/...)");
+    std::string rest = link.substr(at + 14), id = rest.substr(0, rest.find_first_of("?#/ "));
+    bool hex = id.size() == 32;
+    for (char c : id) hex = hex && isxdigit(static_cast<unsigned char>(c));
+    if (!hex) return fail("This Swamp link is damaged");
+    for (auto& c : id) c = char(tolower(static_cast<unsigned char>(c)));
+    std::string cat;
+    size_t q = rest.find("c=");
+    if (q != std::string::npos && (rest[q - 1] == '?' || rest[q - 1] == '&')) cat = rest.substr(q + 2, rest.find_first_of("&# ", q) - q - 2);
+    m_linked.insert(id);
+    if (knownCategory(cat) && !m_subs.count(cat)) {
+        ensureJoined(categoryTopic(cat));
+        if (m_ready) catchupOn(categoryTopic(cat));
+    }
+    return json{{"ok", true}, {"modelId", id}, {"category", knownCategory(cat) ? cat : ""}}.dump();
+}
+
 std::string SwampCoreImpl::getModel(std::string modelId) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     modelId = unquote(modelId);
@@ -1853,12 +1882,13 @@ void SwampCoreImpl::beginSlice(const DownloadJob& j) {
             return fin && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
         };
         std::vector<std::string> inputs = meshes;
-        for (size_t i = 0; i < projects.size(); i++) {   // 3MF -> geometry only
-            std::string sub = out + "/geom" + std::to_string(i), log;
+        for (size_t i = 0; i < projects.size(); i++) {   // 3MF -> geometry only (swamp_3mf.hpp, not the slicer: Orca 2.4.2 crashes on 3MF input)
+            std::string sub = out + "/geom" + std::to_string(i), gerr;
             fs::create_directories(sub, ec);
-            if (!run({"--export-stl", "--outputdir", QString::fromStdString(sub), QString::fromStdString(projects[i])}, log))
-                return json{{"ok", false}, {"error", "Couldn't read the shapes out of " + fs::path(projects[i]).filename().string()}};
-            for (const auto& de : fs::directory_iterator(sub, ec)) if (lowerExt(de.path().string()) == "stl") inputs.push_back(de.path().string());
+            std::vector<std::string> stls;
+            if (!swamp3mf::toStls(projects[i], sub, stls, gerr))
+                return json{{"ok", false}, {"error", "Couldn't read the shapes out of " + fs::path(projects[i]).filename().string() + ": " + gerr}};
+            inputs.insert(inputs.end(), stls.begin(), stls.end());
         }
         std::string bbl = str(orca, "bbl"), log;
         QStringList args{"--arrange", "1", "--slice", "1",

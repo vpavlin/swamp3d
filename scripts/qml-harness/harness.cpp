@@ -7,6 +7,7 @@
 #include <QQmlContext>
 #include <QQuickView>
 #include <QQuickItem>
+#include <QKeyEvent>
 #include <QTimer>
 #include <QFileInfo>
 #include <QLibraryInfo>
@@ -146,6 +147,19 @@ int main(int argc, char** argv) {
     shot("model");
     r->setProperty("openId", ""); r->setProperty("tab", "publish"); shot("publish");
     r->setProperty("tab", "me"); shot("me");
+    // typing into a field must survive the view's periodic refresh (it used to be reset to the saved value)
+    if (auto* f = r->findChild<QQuickItem*>("profName")) {
+        f->forceActiveFocus();
+        QMetaObject::invokeMethod(f, "selectAll");
+        for (QChar c : QString("Bog Witch")) {
+            QKeyEvent dn(QEvent::KeyPress, 0, Qt::NoModifier, QString(c)), up(QEvent::KeyRelease, 0, Qt::NoModifier, QString(c));
+            QCoreApplication::sendEvent(view.contentItem()->window(), &dn); QCoreApplication::sendEvent(view.contentItem()->window(), &up);
+        }
+        for (int i = 0; i < 3; i++) { QMetaObject::invokeMethod(r, "refresh"); pump(1500); }
+        QString t = f->property("text").toString();
+        fprintf(stderr, "TYPING %s (field holds \"%s\")\n", t == "Bog Witch" ? "OK" : "LOST", t.toUtf8().constData());
+        if (t != "Bog Witch") g_errors++;
+    } else { fprintf(stderr, "TYPING: profName not found\n"); g_errors++; }
     fprintf(stderr, "QML_ERRORS=%d SANDBOX_BLOCKED=%d\n", g_errors, sandbox.blocked);
     g_errors += sandbox.blocked;
     return g_errors ? 1 : 0;

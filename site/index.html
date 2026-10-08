@@ -67,6 +67,10 @@
 
   section { padding: 88px 0; position: relative; }
   section.alt { background: var(--mud2); }
+  .steps { padding-left: 1.2em; } .steps li { margin: 10px 0; color: var(--text2); }
+  .repo { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 8px 0 4px; }
+  .repo code { background: var(--moss); border: 1px solid var(--reed); border-radius: 10px; padding: 8px 12px; color: var(--slime2); word-break: break-all; }
+  .repo button { cursor: pointer; padding: 8px 14px; border-radius: 999px; border: 2px solid var(--slime); background: none; color: var(--slime2); font-weight: 700; }
   .grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 28px; }
   .card { background: var(--moss); border: 1px solid var(--reed); border-radius: var(--r); padding: 22px 22px 18px; position: relative; }
   .card h3 { font-size: 1.15rem; color: var(--slime2); }
@@ -117,6 +121,7 @@
       <a class="opt" href="#bog">Look</a>
       <a class="opt" href="#unregulated">Unregulated?</a>
       <a href="#status">Status</a>
+      <a href="#install">Get it</a>
     </nav>
   </div>
   <div class="drips" id="drips" aria-hidden="true"></div>
@@ -133,6 +138,7 @@
         watching what you search for. Find out who really made the thing you're about to print.</p>
       <div class="cta">
         <a class="btn solid" href="#how">Wade in</a>
+        <a class="btn" href="#install">Get it</a>
         <a class="btn" href="#bog">See the bog</a>
       </div>
     </div>
@@ -237,7 +243,31 @@
   </div>
 </section>
 
-<section id="status">
+<section id="install">
+  <div class="wrap">
+    <h2>Get into the swamp</h2>
+    <p>Swamp runs inside <a href="https://github.com/logos-co/logos-basecamp">Logos Basecamp</a> 0.3, on Linux (x86-64).</p>
+    <ol class="steps">
+      <li>Install <b>Basecamp 0.3.1</b>. A separate profile keeps your other apps out of the experiment:
+        <code>HOME=$HOME/swamp-profile ./Basecamp-0.3.1.AppImage</code></li>
+      <li>In Basecamp, open the <b>Package Manager</b>, add this repository and install <b>Swamp</b>. Its
+        dependencies come along.
+        <div class="repo"><code id="repo">https://apps.vpavlin.xyz/basecamp/logos-repo.json</code>
+          <button onclick="navigator.clipboard.writeText(document.getElementById('repo').textContent);this.textContent='Copied'">Copy</button></div></li>
+      <li>Open Swamp, set a name under <b>Me</b>, pick the categories you care about and wade in.</li>
+      <li>To print, install <b>OrcaSlicer 2.4+</b> or <b>Bambu Studio</b>. "Open in slicer" works with any
+        printer. A Bambu Lab <b>A1 / A1 mini</b> in LAN-only + Developer Mode can print straight from Swamp,
+        over your own network.</li>
+      <li>Got a <code>swamp://model/...</code> link from someone? Paste it into the search box.</li>
+    </ol>
+    <div class="cta">
+      <a class="btn solid" href="https://github.com/vpavlin/swamp3d">Source on GitHub</a>
+      <a class="btn" href="https://github.com/vpavlin/swamp3d/issues">Report a bug</a>
+    </div>
+  </div>
+</section>
+
+<section id="status" class="alt">
   <div class="wrap">
     <h2>Where the swamp is at</h2>
     <ol class="road">
@@ -246,6 +276,8 @@
       <li class="done"><span>Follow categories instead of mirroring everything. Lazy pictures.</span></li>
       <li class="done"><span>Global search over signed index snapshots. <small>Proven on the Logos test network: found, opened and downloaded a model from a category the node doesn't follow. Private (mixnet) fetching is built, but switched off until the network's mixnet works.</small></span></li>
       <li class="done"><span>Creators audit the indexers. <small>A hub that silently leaves your model out gets caught with its own signature; a declared exclusion is shown as policy.</small></span></li>
+      <li class="done"><span>Open in your slicer, or print straight to a Bambu Lab A1 over your LAN. <small>Sliced on your machine with the printer's own profile; geometry only, so nobody else's G-code reaches your printer. No cloud, no account.</small></span></li>
+      <li class="done"><span>Share links: send someone a model, they paste it into Swamp.</span></li>
       <li><span>An always-on hub, so two people behind home routers can share files.</span></li>
       <li><span>Copy labels for exact and whole-object copies.</span></li>
       <li><span>"Who published first" anchored on LEZ.</span></li>
@@ -262,7 +294,7 @@
   <div class="wrap">
     <img src="img/duck.png" alt="">
     <span>Swamp · an independent experiment, built on the Logos tech stack · not endorsed by or affiliated with Logos</span>
-    <span>Mind the mosquitoes.</span>
+    <span><a href="https://github.com/vpavlin/swamp3d" style="color:inherit">GitHub</a> · MIT / Apache-2.0 · Mind the mosquitoes.</span>
   </div>
 </footer>
 

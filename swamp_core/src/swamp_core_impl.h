@@ -32,6 +32,8 @@ public:
     std::string resync();
     std::string listModels(std::string queryJson);
     std::string getModel(std::string modelId);
+    // a share link (swamp://model/<id>?c=<category>) -> {modelId}; listens on its category so the model can arrive
+    std::string openLink(std::string link);
     // copy a picture this node holds into <viewDir>/cache/ and return its path (views are sandboxed)
     std::string cacheImage(std::string sha, std::string viewDir);
 
@@ -187,6 +189,7 @@ private:
     std::map<std::string, DownloadJob> m_jobs;
     std::map<std::string, std::string> m_myCids, m_toAnnounce;
     std::set<std::string> m_subs, m_joined;
+    std::set<std::string> m_linked;   // models opened from a share link this session
     std::map<std::string, long long> m_wantImg, m_extraImg, m_recordAt;
     std::map<std::string, std::vector<std::string>> m_extraCids;
     std::set<std::string> m_privateFetch, m_indexShas, m_openAfter;

@@ -148,6 +148,20 @@ Item {
     function size(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : n > 1024 ? Math.round(n / 1024) + " KB" : n + " B" }
     function day(ms) { return ms ? new Date(ms).toISOString().slice(0, 10) : "" }
     function ver() { if (!root.model) return null; var vs = root.model.versions; var i = root.openVersion > 0 ? root.openVersion - 1 : vs.length - 1; return vs[Math.min(i, vs.length - 1)] }
+    function shareLink() { return root.model ? "swamp://model/" + root.model.modelId + "?c=" + encodeURIComponent(root.model.category || "other") : "" }
+    function shareText() { return root.model ? root.model.title + " by " + (root.model.creatorName || "someone") + " on Swamp: " + root.shareLink() : "" }
+    // a pasted share link (or a whole shared message containing one) opens the model instead of searching
+    function openOrSearch(text) {
+        if (text.indexOf("swamp://model/") >= 0) {
+            root.core("openLink", [text], function (raw) {
+                var r = root.parse(raw)
+                if (!r || r.ok === false) { root.toast(r ? r.error : "Request failed - is swamp_core loaded?", true); return }
+                root.query = ""; root.openModel(r.modelId)
+            })
+            return
+        }
+        root.query = text; root.refresh()
+    }
     function openModel(id) { root.openId = id; root.openVersion = 0; root.shownImage = 0; root.model = null; root.refresh() }
     function presetCategory(id) { var cs = root.st.categories || []; for (var i = 0; i < cs.length; i++) if (cs[i].id === id) { pCategory.currentIndex = i; return } }
     function clearDraft() {
@@ -198,6 +212,13 @@ Item {
         ColumnLayout { id: inner; anchors.fill: parent; anchors.margins: root.sp; spacing: root.spS }
     }
     component Field: TextField {
+        // the core's value for this field; it fills the field only while you're not editing it
+        // (binding `text` to the polled state would overwrite what you type on every refresh)
+        property string saved: ""
+        property bool edited: false
+        onSavedChanged: if (!activeFocus && !edited) text = saved
+        onTextEdited: edited = true
+        Component.onCompleted: if (saved !== "") text = saved
         Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 200
         color: root.cText; placeholderTextColor: root.cText3; font.pixelSize: 13
         background: Rectangle { color: root.cInset; radius: root.rad; border.color: parent.activeFocus ? root.cPrimary : root.cLine }
@@ -274,10 +295,10 @@ Item {
                     spacing: root.sp
                     RowLayout {
                         Layout.fillWidth: true
-                        Field { id: search; placeholderText: "Search models, tags..."; onAccepted: { root.query = text; root.refresh() } }
+                        Field { id: search; placeholderText: "Search models, tags... or paste a swamp:// link"; onAccepted: root.openOrSearch(text) }
                         ComboBox { id: sortBox; model: ["Newest", "Most liked", "Most made"]; Layout.preferredWidth: 160
                             onActivated: { root.sortBy = ["new", "likes", "makes"][currentIndex]; root.refresh() } }
-                        LogosButton { text: "Search"; onClicked: { root.query = search.text; root.refresh() } }
+                        LogosButton { text: "Search"; onClicked: root.openOrSearch(search.text) }
                     }
                     Flow {
                         Layout.fillWidth: true; spacing: 6
@@ -411,6 +432,9 @@ Item {
                                     LogosButton { Layout.preferredWidth: 110; text: root.model && root.model.likedByMe ? "Unlike (" + root.model.likes + ")" : "Like (" + (root.model ? root.model.likes : 0) + ")"
                                         onClicked: root.act("like", [root.model.modelId, root.model.likedByMe ? "false" : "true"], "") }
                                     LogosButton { Layout.preferredWidth: 100; text: "Remix"; onClicked: root.startRemix() }
+                                    LogosButton { Layout.preferredWidth: 100; text: "Share"
+                                        ToolTip.visible: hovered; ToolTip.text: "Copies a link. Anyone with Swamp can paste it into the search box to open this model."
+                                        onClicked: root.copy(root.shareText(), "Link") }
                                     LogosButton { Layout.preferredWidth: 120; visible: !!root.model && root.model.mine; text: "New version"; onClicked: root.startNewVersion() }
                                     LogosButton { Layout.preferredWidth: 100; visible: !!root.model && root.model.mine && !root.model.retracted; text: "Retract"; onClicked: retractDlg.open() }
                                 }
@@ -567,9 +591,9 @@ Item {
                         T1 { text: "Your profile" }
                         T2 { Layout.fillWidth: true; text: "Shown next to your models and comments. It's a name, not an account - your identity is a key on this device." }
                         RowLayout { Layout.fillWidth: true
-                            Field { id: profName; placeholderText: "display name"; text: root.st.me && root.st.me.profile ? (root.st.me.profile.name || "") : "" }
-                            Field { id: profBio; placeholderText: "a line about you (optional)"; text: root.st.me && root.st.me.profile ? (root.st.me.profile.bio || "") : "" }
-                            LogosButton { text: "Save"; onClicked: root.act("setProfile", [JSON.stringify({ name: profName.text, bio: profBio.text })], "Profile saved") } }
+                            Field { id: profName; objectName: "profName"; placeholderText: "display name"; saved: root.st.me && root.st.me.profile ? (root.st.me.profile.name || "") : "" }
+                            Field { id: profBio; placeholderText: "a line about you (optional)"; saved: root.st.me && root.st.me.profile ? (root.st.me.profile.bio || "") : "" }
+                            LogosButton { text: "Save"; onClicked: root.act("setProfile", [JSON.stringify({ name: profName.text, bio: profBio.text })], "Profile saved", function () { profName.edited = false; profBio.edited = false }) } }
                         RowLayout { Layout.fillWidth: true
                             T3 { text: "Your key:" }
                             Text { textFormat: Text.PlainText; Layout.fillWidth: true; elide: Text.ElideMiddle; color: root.cText2; font.family: "monospace"; font.pixelSize: 11; text: root.st.me ? root.st.me.address : "" }
@@ -617,14 +641,14 @@ Item {
                             delegate: RowLayout { spacing: root.spS
                                 T2 { text: (modelData.name || "Bambu Lab printer") + "  ·  " + modelData.ip + "  ·  " + modelData.serial }
                                 Text { textFormat: Text.PlainText; text: "use this one"; color: root.cPrimary; font.pixelSize: 12; font.underline: true
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { pIp.text = modelData.ip; pSerial.text = modelData.serial; pModel.text = modelData.model; pName.text = modelData.name || "" } } } } }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { pIp.text = modelData.ip; pSerial.text = modelData.serial; pModel.text = modelData.model; pName.text = modelData.name || ""; pIp.edited = pSerial.edited = pModel.edited = true } } } } }
                         GridLayout { columns: 4; columnSpacing: root.spS; rowSpacing: root.spS; Layout.fillWidth: true
-                            Field { id: pIp; placeholderText: "IP address"; text: root.st.printer ? root.st.printer.ip : "" }
-                            Field { id: pSerial; placeholderText: "serial number"; text: root.st.printer ? root.st.printer.serial : "" }
-                            Field { id: pModel; placeholderText: "model: A1 or A1 mini"; text: root.st.printer ? root.st.printer.model : "" }
+                            Field { id: pIp; placeholderText: "IP address"; saved: root.st.printer ? root.st.printer.ip : "" }
+                            Field { id: pSerial; placeholderText: "serial number"; saved: root.st.printer ? root.st.printer.serial : "" }
+                            Field { id: pModel; placeholderText: "model: A1 or A1 mini"; saved: root.st.printer ? root.st.printer.model : "" }
                             Field { id: pName; placeholderText: "name (optional)" }
                             Field { id: pCode; placeholderText: root.st.printer && root.st.printer.hasAccessCode ? "access code (saved)" : "access code (on the printer's screen)"; echoMode: TextInput.Password }
-                            LogosButton { text: "Save printer"; onClicked: root.act("setPrinter", [JSON.stringify({ ip: pIp.text, serial: pSerial.text, model: pModel.text, name: pName.text, accessCode: pCode.text })], "Printer saved", function () { pCode.text = "" }) }
+                            LogosButton { text: "Save printer"; onClicked: root.act("setPrinter", [JSON.stringify({ ip: pIp.text, serial: pSerial.text, model: pModel.text, name: pName.text, accessCode: pCode.text })], "Printer saved", function () { pCode.text = ""; pIp.edited = false; pSerial.edited = false; pModel.edited = false }) }
                         }
                     }
                     Card {

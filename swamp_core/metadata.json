@@ -1,7 +1,7 @@
 {
   "name": "swamp_core",
   "display_name": "Swamp Core",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "type": "core",
   "interface": "universal",
   "category": "social",
@@ -12,13 +12,30 @@
     "storage_module"
   ],
   "nix": {
-    "packages": { "build": ["openssl"], "runtime": ["openssl"] },
+    "packages": {
+      "build": [
+        "openssl",
+        "zlib"
+      ],
+      "runtime": [
+        "openssl",
+        "zlib"
+      ]
+    },
     "external_libraries": [],
     "cmake": {
-      "find_packages": ["OpenSSL"],
+      "find_packages": [
+        "OpenSSL",
+        "ZLIB"
+      ],
       "extra_sources": [],
-      "extra_include_dirs": ["src"],
-      "extra_link_libraries": ["OpenSSL::Crypto"]
+      "extra_include_dirs": [
+        "src"
+      ],
+      "extra_link_libraries": [
+        "OpenSSL::Crypto",
+        "ZLIB::ZLIB"
+      ]
     }
   }
 }

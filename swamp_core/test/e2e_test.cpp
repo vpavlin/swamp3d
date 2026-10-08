@@ -39,6 +39,7 @@ static Peer* spawn(const std::string& name, bool hub = false) {
 }
 
 int main(int argc, char** argv) {
+    std::string sharedToolId;   // for the share-link test at the end
     QCoreApplication app(argc, argv);
     std::string repo = argc > 1 ? argv[1] : ".";
     root = std::string(getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") + "/swamp-e2e";
@@ -385,6 +386,7 @@ int main(int argc, char** argv) {
             json gsA = json::parse(alice->core.globalSearch(json{{"q", "spinning"}}.dump()));
             CHECK(gsA["index"]["indexer"] != rogueAddr, "Alice's searches no longer use the rogue indexer");
         }
+        sharedToolId = tool.value("modelId", "");
         (void)toy; (void)tool;
     }
 
@@ -397,9 +399,28 @@ int main(int argc, char** argv) {
         FakeLoamBus::get().nodes.push_back(&dave->bus); FakeStoreNet::get().nodes.push_back(&dave->store);
         dave->core.fakeStart();
         CHECK(waitFor([&] { return dave->snap()["status"] == "Connected"; }, 4000), "lost Connected event: status poll brings the node up");
-        CHECK(waitFor([&] { return json::parse(dave->core.listModels("{}"))["total"].get<int>() >= 2; }, 20000), "...and it catches up");
+        CHECK(waitFor([&] { return json::parse(dave->core.listModels("{}"))["total"].get<int>() >= 2; }, 20000), "...and it catches up (has " << json::parse(dave->core.listModels("{}"))["total"] << ")");
     }
 
+    // share links: a node that follows neither the category nor has the model opens it from a link
+    {
+        std::string toolId = sharedToolId;
+        setenv("SWAMP_CATEGORIES", "garden", 1);
+        Peer* lena = spawn("lena");
+        pump(1300);
+        unsetenv("SWAMP_CATEGORIES");
+        CHECK(!json::parse(lena->core.openLink("https://example.com/x")).value("ok", true), "a non-Swamp link is refused");
+        CHECK(!json::parse(lena->core.openLink("swamp://model/zz12")).value("ok", true), "a damaged link is refused");
+        json ol = json::parse(lena->core.openLink("Wrench holder by Alice on Swamp: swamp://model/" + toolId + "?c=tools\n"));
+        CHECK(ol.value("ok", false) && ol["modelId"] == toolId && ol["category"] == "tools", "a shared message opens to its model id and category");
+        json lm;
+        CHECK(waitFor([&] { lm = json::parse(lena->core.getModel(toolId)); return lm.value("ok", false); }, 15000), "...and the model opens on a node that doesn't follow Tools");
+        CHECK(lm["model"].value("title", "") == "Wrench holder", "...it's the shared model");
+        CHECK(json::parse(lena->core.listModels("{}"))["total"].get<int>() == 0, "...without adding Tools to her Browse");
+        // off the network again, so she doesn't change the timing of the tests below
+        auto& bn = FakeLoamBus::get().nodes; bn.erase(std::remove(bn.begin(), bn.end(), &lena->bus), bn.end());
+        auto& sn = FakeStoreNet::get().nodes; sn.erase(std::remove(sn.begin(), sn.end(), &lena->store), sn.end());
+    }
     std::cout << passes << " passed, " << fails << " failed\n";
     return fails ? 1 : 0;
 }
