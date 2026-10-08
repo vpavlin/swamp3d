@@ -255,9 +255,9 @@
         <div class="repo"><code id="repo">https://apps.vpavlin.xyz/basecamp/logos-repo.json</code>
           <button onclick="navigator.clipboard.writeText(document.getElementById('repo').textContent);this.textContent='Copied'">Copy</button></div></li>
       <li>Open Swamp, set a name under <b>Me</b>, pick the categories you care about and wade in.</li>
-      <li>To print, install <b>OrcaSlicer 2.4+</b> or <b>Bambu Studio</b>. "Open in slicer" works with any
-        printer. A Bambu Lab <b>A1 / A1 mini</b> in LAN-only + Developer Mode can print straight from Swamp,
-        over your own network.</li>
+      <li>To print, press <b>Open in slicer</b> on a model: Swamp opens the verified files in your slicer
+        (OrcaSlicer, Bambu Studio or PrusaSlicer), and you print the way you always do. No slicer yet? Swamp
+        offers to set up OrcaSlicer for you.</li>
       <li>Got a <code>swamp://model/...</code> link from someone? Paste it into the search box.</li>
     </ol>
     <div class="cta">
@@ -276,7 +276,7 @@
       <li class="done"><span>Follow categories instead of mirroring everything. Lazy pictures.</span></li>
       <li class="done"><span>Global search over signed index snapshots. <small>Proven on the Logos test network: found, opened and downloaded a model from a category the node doesn't follow. Private (mixnet) fetching is built, but switched off until the network's mixnet works.</small></span></li>
       <li class="done"><span>Creators audit the indexers. <small>A hub that silently leaves your model out gets caught with its own signature; a declared exclusion is shown as policy.</small></span></li>
-      <li class="done"><span>Open in your slicer, or print straight to a Bambu Lab A1 over your LAN. <small>Sliced on your machine with the printer's own profile; geometry only, so nobody else's G-code reaches your printer. No cloud, no account.</small></span></li>
+      <li class="done"><span>Open in your slicer, with one-click OrcaSlicer setup. <small>Printing straight to a Bambu Lab A1 over the LAN exists as a switched-off experiment: in its first real test the printer drove its head into the top of its frame, so it stays off until we know why.</small></span></li>
       <li class="done"><span>Share links: send someone a model, they paste it into Swamp.</span></li>
       <li><span>An always-on hub, so two people behind home routers can share files.</span></li>
       <li><span>Copy labels for exact and whole-object copies.</span></li>
