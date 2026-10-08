@@ -1,0 +1,70 @@
+# Build Swamp's linux-arm64 packages on a GitHub ARM runner and attach them to a release, so they
+# can be merged into the linux-amd64 packages (one .lgx per module, both platforms inside).
+#
+# Runs on a push of a tag `arm64-*` (git tag arm64-0.5.5 && git push origin arm64-0.5.5), or by hand.
+# The release `<tag>` gets swamp_core-linux-arm64.lgx, swamp-linux-arm64.lgx and the build logs.
+#
+# ARMv8.0 (Pi 3/4, MT8183 Chromebooks like the Lenovo Duet) has no LSE atomics: the build checks the
+# plugin has no inline LSE instructions, which would SIGILL there.
+name: arm64 packages
+
+on:
+  push:
+    tags: ["arm64-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = https://cache.nix.logos.co/public
+            extra-trusted-public-keys = public:Z1wyVBEx8PHbXujYB52Mysv9Rd8rWIhyQ3bQyef9yy4=
+            accept-flake-config = true
+      - name: Build
+        shell: bash
+        run: |
+          set -u -o pipefail
+          mkdir -p out logs
+          ok=1
+          for m in swamp_core:swamp_core swamp:module; do
+            name=${m%%:*}; dir=${m#*:}
+            if (cd "$dir" && nix build --accept-flake-config .#lgx-portable -o "$GITHUB_WORKSPACE/res-$name") > "logs/$name.log" 2>&1; then
+              cp -L res-$name/*.lgx "out/$name-linux-arm64.lgx"; echo "$name OK"
+            else
+              echo "$name FAILED"; tail -80 "logs/$name.log"; ok=0
+            fi
+          done
+          [ $ok = 1 ]
+      - name: No inline LSE atomics (ARMv8.0)
+        shell: bash
+        run: |
+          set -eu
+          mkdir x && tar -xzf out/swamp_core-linux-arm64.lgx -C x
+          ls x/variants
+          n=0
+          for so in x/variants/*/*.so*; do
+            c=$(objdump -d "$so" | awk '/^[0-9a-f]+ <.*>:$/ {fn=$2} /\t(cas|casa|casl|casal|swp|swpa|swpl|swpal|ldadd|ldadda|ldaddl|ldaddal|ldclr|ldset|ldeor)[bh]?\t/ && fn !~ /__aarch64_/ {print}' | wc -l)
+            echo "$so: $c inline LSE instructions"; n=$((n + c))
+          done
+          [ "$n" = 0 ] || { echo "would SIGILL on ARMv8.0"; exit 1; }
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            out/*.lgx
+            logs/*.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: swamp-linux-arm64
+          path: |
+            out/
+            logs/
