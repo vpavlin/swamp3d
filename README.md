@@ -62,4 +62,8 @@ the protocol in `docs/SPEC.md`, and the plan in `docs/ROADMAP.md`.
 
 ## Licence
 
-MIT, see `LICENSE`.
+Dual-licensed under either of, at your option:
+- the Apache License, Version 2.0 (`LICENSE-APACHE-v2`);
+- the MIT licence (`LICENSE-MIT`).
+
+This is the same as the Logos projects.
