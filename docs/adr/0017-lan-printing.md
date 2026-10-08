@@ -1,6 +1,13 @@
 # 0017. Print to Bambu Lab printers over the LAN; slice locally with the printer's default profile
 
-- Status: Accepted. Built in 0.5.0; certificate pins and busy-printer check in 0.5.2. Tested against a fake printer (bambu_mock.py) and with the real
+- Status: **Suspended (0.5.5): switched off by default**, behind `SWAMP_EXPERIMENTAL_PRINT=1`. Built in
+  0.5.0; certificate pins and busy-printer check in 0.5.2.
+  - In the first real-A1 test (2026-10-08) the job was accepted, then the printer drove its head up
+    against the top of the frame, slipping on the Z rods. The cause isn't known.
+  - Found since: the sliced G-code's header showed `printable_area = 200x200` (the A1 is 256x256),
+    so the profile wasn't fully applied. The 3MF reader also ignored the file's `unit` (fixed in 0.5.5).
+  - The A1's own start G-code moves Z up "until stall" (`G380 S2 Z40`), which may also play a part.
+  - "Open in slicer" stays the supported way to print. Tested against a fake printer (bambu_mock.py) and with the real
   OrcaSlicer 2.4.2. Not yet tested on a real printer.
 - Date: 2026-10-06
 

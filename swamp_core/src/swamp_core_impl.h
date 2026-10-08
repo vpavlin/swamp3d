@@ -183,6 +183,7 @@ private:
     std::recursive_mutex m_mtx;
     std::string m_dataDir, m_downloadsDir, m_status = "Starting...";
     bool m_storageOk = true, m_ready = false, m_transportStarted = false, m_storageStarted = false, m_storageHostOwned = false, m_hub = false;
+    bool m_experimentalPrint = false;   // SWAMP_EXPERIMENTAL_PRINT=1
     bool m_dirty = false, m_unsaved = false, m_loaded = false;
     // false once destroyed: module/storage callbacks hold a copy and check it before touching `this`
     std::shared_ptr<std::atomic<bool>> m_life = std::make_shared<std::atomic<bool>>(true);

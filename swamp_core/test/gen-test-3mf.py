@@ -41,3 +41,14 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         info = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0)); info.compress_type = zipfile.ZIP_DEFLATED
         z.writestr(info, data)
 print(out)
+
+# inch.3mf: a one-inch cube in a model whose unit is inches -> 25.4 mm
+inch = ('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="inch" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>'
+        '<object id="1" type="model"><mesh><vertices>' + "".join('<vertex x="%g" y="%g" z="%g"/>' % p for p in cube_v) + '</vertices><triangles>'
+        + "".join('<triangle v1="%d" v2="%d" v3="%d"/>' % p for p in cube_t) + '</triangles></mesh></object></resources>'
+        '<build><item objectid="1" transform="1 0 0 0 1 0 0 0 1 2 0 0"/></build></model>')
+out2 = os.path.join(here, "meshes", "inch.3mf")
+with zipfile.ZipFile(out2, "w", zipfile.ZIP_DEFLATED) as z:
+    info = zipfile.ZipInfo("3D/3dmodel.model", (2026, 1, 1, 0, 0, 0)); info.compress_type = zipfile.ZIP_DEFLATED
+    z.writestr(info, inch)
+print(out2)

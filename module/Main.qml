@@ -480,7 +480,7 @@ Item {
                                         ToolTip.visible: hovered; ToolTip.text: root.st.slicer ? "Downloads and verifies the files if needed, then opens them in " + root.st.slicer.name : "Install OrcaSlicer, Bambu Studio or PrusaSlicer to open models in it from here"
                                         onClicked: root.act("openInSlicer", [root.model.modelId, String(root.ver().v)], "Opening in " + (root.st.slicer ? root.st.slicer.name : "your slicer") + "...") }
                                     LogosButton { Layout.preferredWidth: 150
-                                        visible: !!root.st.printer
+                                        visible: !!root.st.printer && !!root.st.experimentalPrint
                                         enabled: !!root.st.printer && root.st.printer.supported && !root.printBusy
                                         text: root.st.printer ? "Print on " + root.st.printer.name.replace("Bambu Lab ", "") : "Print"
                                         ToolTip.visible: hovered; ToolTip.text: "Slices with the printer's default profile (0.20 mm, PLA) and sends it over your LAN after you confirm"
@@ -687,7 +687,16 @@ Item {
                             LogosButton { text: "Only mine"; onClicked: root.act("setCategories", [JSON.stringify([])], "") } }
                     }
                     Card {
-                        T1 { text: "Printer" }
+                        T1 { text: "Slicer" }
+                        T2 { Layout.fillWidth: true; text: "\"Open in slicer\" on a model page downloads its files (checked against their hashes) and opens them in your slicer, where you check the preview and print the way you always do." }
+                        T2 { Layout.fillWidth: true; visible: !!root.st.slicer; color: root.cOk; text: root.st.slicer ? "Opens in " + root.st.slicer.name + "." : "" }
+                        FixPanel { fix: root.st.slicer ? null : (root.st.printSlicerFix || null) }
+                    }
+                    Card {
+                        visible: !!root.st.experimentalPrint   // SWAMP_EXPERIMENTAL_PRINT=1 only
+                        T1 { text: "Printer (experimental)" }
+                        T2 { Layout.fillWidth: true; color: root.cErr
+                             text: "Unfinished experiment. In its first real test the printer drove its head against the top of the frame. Only use it if you can watch the printer and stop it." }
                         T2 { Layout.fillWidth: true
                              text: "Print straight from Swamp to a Bambu Lab A1 or A1 mini on your network - no cloud, no account. The printer has to be in LAN-only mode with Developer Mode on (printer screen: Settings > Network/LAN; then restart it). That switches off Bambu's cloud printing while it's on. Needs OrcaSlicer 2.4+ or Bambu Studio. Only pick a printer you recognise: Swamp remembers its certificate on first contact and refuses an impostor later, but it can't tell which device is yours the first time." }
                         T2 { Layout.fillWidth: true; visible: !!root.st.printSlicer; color: root.cOk; text: root.st.printSlicer ? "Slicing with " + root.st.printSlicer.name + "." : "" }

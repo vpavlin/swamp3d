@@ -26,8 +26,11 @@ and without deleting anything.
 - **Global search** over signed, deterministic index snapshots in Storage.
 - **Model pages:** versions, remixes, makes with photos, comments, likes, retract.
 - **Verified downloads**, and "Open in slicer" (OrcaSlicer, Bambu Studio, PrusaSlicer).
-- **LAN printing** to a Bambu Lab A1 / A1 mini in Developer Mode: slice locally with the printer's
-  default profile, confirm, upload, start. No cloud.
+- **One-click slicer setup:** if no usable OrcaSlicer is installed, Swamp downloads a pinned,
+  hash-checked OrcaSlicer 2.4.2 and uses it.
+- **Experimental, switched off: LAN printing** to a Bambu Lab A1 / A1 mini (`SWAMP_EXPERIMENTAL_PRINT=1`).
+  In its first real test (2026-10-08) the printer drove its head into the top of its frame; the cause
+  isn't known yet. Don't enable it unless you can watch the printer and stop it.
 - **Indexer audits:** declared exclusions, plus the creator's own inclusion checks.
 
 ## Layout

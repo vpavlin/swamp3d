@@ -39,6 +39,7 @@ static Peer* spawn(const std::string& name, bool hub = false) {
 }
 
 int main(int argc, char** argv) {
+    setenv("SWAMP_EXPERIMENTAL_PRINT", "1", 1);   // the LAN-printing tests below; the last node runs without it
     std::string sharedToolId;   // for the share-link test at the end: a model in Fashion, which every index carries
     QCoreApplication app(argc, argv);
     std::string repo = argc > 1 ? argv[1] : ".";
@@ -430,6 +431,7 @@ int main(int argc, char** argv) {
     {
         std::string sharedId = sharedToolId;
         setenv("SWAMP_CATEGORIES", "garden", 1);
+        unsetenv("SWAMP_EXPERIMENTAL_PRINT");
         Peer* lena = spawn("lena");
         pump(1300);
         unsetenv("SWAMP_CATEGORIES");
@@ -441,6 +443,11 @@ int main(int argc, char** argv) {
         CHECK(waitFor([&] { lm = json::parse(lena->core.getModel(sharedId)); return lm.value("ok", false); }, 15000), "...and the model opens on a node that doesn't follow its category");
         CHECK(lm.contains("model") && lm["model"].value("modelId", "") == sharedId, "...it's the shared model (" + (lm.contains("model") ? lm["model"].value("title", "") : lm.dump()) + ")");
         CHECK(json::parse(lena->core.listModels("{}"))["total"].get<int>() == 0, "...without adding that category to her Browse");
+        // direct printing is off unless asked for (it drove a real A1's head into its frame, 2026-10-08)
+        json np = json::parse(lena->core.preparePrint(sharedId, "1"));
+        CHECK(!np.value("ok", true) && np.value("error", "").find("switched off") != std::string::npos && lena->snap()["experimentalPrint"] == false,
+              "direct printing is switched off by default (" + np.dump() + ")");
+        CHECK(!json::parse(lena->core.findPrinters()).value("ok", true) && !json::parse(lena->core.startPrint("yes")).value("ok", true), "...including finding printers and starting a print");
         auto& bn = FakeLoamBus::get().nodes; bn.erase(std::remove(bn.begin(), bn.end(), &lena->bus), bn.end());
         auto& sn = FakeStoreNet::get().nodes; sn.erase(std::remove(sn.begin(), sn.end(), &lena->store), sn.end());
     }

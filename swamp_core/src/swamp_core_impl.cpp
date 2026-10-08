@@ -29,7 +29,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.4";
+static const char* SWAMP_VERSION = "0.5.5";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
@@ -174,6 +174,11 @@ void SwampCoreImpl::setupDataDir() {
     if (ec) fprintf(stderr, "[swamp] cannot create %s: %s\n", m_dataDir.c_str(), ec.message().c_str());
     const char* hub = getenv("SWAMP_HUB");
     m_hub = hub && (std::string(hub) == "1" || std::string(hub) == "true");
+    // Direct printing is an experiment, off unless asked for: in the first real-A1 test the printer
+    // drove its head against the top of the frame (2026-10-08, cause not yet known). "Open in slicer"
+    // is the supported way to print.
+    const char* xp = getenv("SWAMP_EXPERIMENTAL_PRINT");
+    m_experimentalPrint = xp && (std::string(xp) == "1" || std::string(xp) == "true");
     const char* ix = getenv("SWAMP_INDEXER");
     m_indexer = m_hub || (ix && (std::string(ix) == "1" || std::string(ix) == "true"));
     if (const char* ev = getenv("SWAMP_INDEX_EVERY_MS")) m_indexEveryMs = std::max(1000LL, atoll(ev));
@@ -1013,9 +1018,9 @@ json SwampCoreImpl::slicerFix(const std::string& log, const json& slicer) const 
                          {"command", std::string("mkdir -p ~/Applications && curl -L -o ~/Applications/OrcaSlicer-2.4.2.AppImage '") + b->url + "' && chmod +x ~/Applications/OrcaSlicer-2.4.2.AppImage"}});
     };
     if (slicer.is_null()) {
-        json fx{{"title", "Printing needs OrcaSlicer"}, {"action", b ? "installSlicer" : ""},
-                {"text", std::string("Swamp slices on your computer with OrcaSlicer, using the printer's own profile. ") +
-                         (b ? "It isn't installed yet. Swamp can download OrcaSlicer 2.4.2 (about 140 MB, from OrcaSlicer's GitHub releases, checked against a pinned hash) and set it up for you." : "Install OrcaSlicer 2.4 or newer, or Bambu Studio, then restart Basecamp.")}};
+        json fx{{"title", "No slicer found"}, {"action", b ? "installSlicer" : ""},
+                {"text", std::string("To print a model, Swamp opens it in a slicer, and none is installed. ") +
+                         (b ? "Swamp can download OrcaSlicer 2.4.2 for you (about 140 MB, from OrcaSlicer's GitHub releases, checked against a pinned hash)." : "Install OrcaSlicer 2.4 or newer, or Bambu Studio, then restart Basecamp.")}};
         manual(); fx["steps"] = steps; return fx;
     }
     if (lacks("libwebkit2gtk-4.0")) {
@@ -1342,7 +1347,7 @@ std::string SwampCoreImpl::snapshot() {
     for (const auto& [id, m] : m_cat.models) if (!m.versions.empty() && !m.retracted) visible++;
     size_t inflight = 0;
     for (const auto& [s, f] : m_fetch) inflight += f.inflight;
-    return json{{"ok", true}, {"version", SWAMP_VERSION}, {"status", m_status}, {"hub", m_hub},
+    return json{{"ok", true}, {"version", SWAMP_VERSION}, {"status", m_status}, {"hub", m_hub}, {"experimentalPrint", m_experimentalPrint},
                 {"me", {{"address", m_id.address}, {"profile", profile}}},
                 {"categories", categoriesJson()},
                 {"transport", transportHealth()},
@@ -1865,6 +1870,7 @@ json SwampCoreImpl::printerPublic() {
 
 std::string SwampCoreImpl::findPrinters() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_experimentalPrint) return fail("Direct printing is switched off: it's an unfinished experiment (start Basecamp with SWAMP_EXPERIMENTAL_PRINT=1 to try it, at your own risk). Use Open in slicer to print.");
     // a fresh 6-second listen unless one is running or just finished (polling must not restart it)
     if (!m_discovering && nowMs() - m_discoveredAt > 15000) {
         m_discovering = true;
@@ -1881,6 +1887,7 @@ std::string SwampCoreImpl::findPrinters() {
 
 std::string SwampCoreImpl::setPrinter(std::string printerJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_experimentalPrint) return fail("Direct printing is switched off: it's an unfinished experiment (start Basecamp with SWAMP_EXPERIMENTAL_PRINT=1 to try it, at your own risk). Use Open in slicer to print.");
     json p = parseArg(printerJson);
     if (!p.is_object()) return fail("The printer settings are not valid JSON");
     std::string ip = clip(p, "ip", 64), serial = clip(p, "serial", 40), code = clip(p, "accessCode", 32);
@@ -1998,6 +2005,7 @@ static json locateBblProfiles(const json& sl, const json& profiles, const std::s
 
 std::string SwampCoreImpl::preparePrint(std::string modelId, std::string version) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_experimentalPrint) return fail("Direct printing is switched off: it's an unfinished experiment (start Basecamp with SWAMP_EXPERIMENTAL_PRINT=1 to try it, at your own risk). Use Open in slicer to print.");
     if (!m_loaded) return fail("Swamp is still starting - try again in a moment");
     std::string stage = str(m_pjob, "stage");
     if (stage == "downloading" || stage == "slicing" || stage == "uploading" || stage == "starting") return fail("A print is already being prepared");
@@ -2124,6 +2132,7 @@ void SwampCoreImpl::beginSlice(const DownloadJob& j) {
 
 std::string SwampCoreImpl::startPrint(std::string confirm) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_experimentalPrint) return fail("Direct printing is switched off: it's an unfinished experiment (start Basecamp with SWAMP_EXPERIMENTAL_PRINT=1 to try it, at your own risk). Use Open in slicer to print.");
     if (str(m_pjob, "stage") != "ready") return fail("Nothing is ready to print");
     if (unquote(confirm) != "yes") return fail("Confirm to start the print");
     bambu::Printer p = printerConf();

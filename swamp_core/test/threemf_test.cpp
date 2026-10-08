@@ -36,6 +36,13 @@ int main(int argc, char** argv) {
         CHECK(tets.n == 8, "two tetrahedron components: 8 triangles");
         CHECK(near(tets.lo[0], 50) && near(tets.hi[0], 80) && near(tets.hi[2], 10), "tetrahedra: component offsets + item move");
     }
+    {   // units: a one-inch cube moved 2 inches along x, in a model whose unit is inches
+        fs::path sub = tmp / "inch"; fs::create_directories(sub);
+        std::vector<std::string> out; std::string e;
+        bool k = swamp3mf::toStls(meshes + "/inch.3mf", sub.string(), out, e);
+        Stl c = k && out.size() == 1 ? readStl(out[0]) : Stl();
+        CHECK(k && near(c.lo[0], 50.8f) && near(c.hi[0], 76.2f) && near(c.hi[2], 25.4f), "a model in inches comes out in millimetres (" << c.lo[0] << ".." << c.hi[0] << ") " << e);
+    }
     for (int i = 2; i < argc; i++) {   // real projects (e.g. one OrcaSlicer saved)
         fs::path sub = tmp / ("x" + std::to_string(i)); fs::create_directories(sub);
         std::vector<std::string> out; std::string e;

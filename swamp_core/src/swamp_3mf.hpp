@@ -104,14 +104,25 @@ using Objects = std::map<std::pair<std::string, int>, Object>;   // (model file,
 inline bool parseModel(const std::string& file, const std::string& xml, Objects& objs, std::vector<Item>* build, std::string& err) {
     QXmlStreamReader r(QByteArray::fromRawData(xml.data(), int(xml.size())));
     Object* cur = nullptr;
+    double mm = 1;   // the file's unit in millimetres (<model unit="...">; the default is millimetre)
     while (!r.atEnd()) {
         if (r.readNext() != QXmlStreamReader::StartElement) continue;
         const auto n = r.name();
         const auto a = r.attributes();
-        if (n == u"object") { cur = &objs[{file, a.value("id").toInt()}]; }
+        if (n == u"model") {
+            const QString u = a.value("unit").toString();
+            if (u.isEmpty() || u == "millimeter") mm = 1;
+            else if (u == "micron") mm = 0.001;
+            else if (u == "centimeter") mm = 10;
+            else if (u == "inch") mm = 25.4;
+            else if (u == "foot") mm = 304.8;
+            else if (u == "meter") mm = 1000;
+            else { err = "an unknown unit \"" + u.toStdString() + "\" in " + file; return false; }
+        }
+        else if (n == u"object") { cur = &objs[{file, a.value("id").toInt()}]; }
         else if (n == u"vertex" && cur) {
             bool ox, oy, oz;
-            cur->v.push_back({a.value("x").toDouble(&ox), a.value("y").toDouble(&oy), a.value("z").toDouble(&oz)});
+            cur->v.push_back({a.value("x").toDouble(&ox) * mm, a.value("y").toDouble(&oy) * mm, a.value("z").toDouble(&oz) * mm});
             if (!ox || !oy || !oz) { err = "a bad vertex in " + file; return false; }
         }
         else if (n == u"triangle" && cur) {
@@ -126,6 +137,7 @@ inline bool parseModel(const std::string& file, const std::string& xml, Objects&
             for (const auto& at : a) if (at.name() == u"path") p = at.value().toString();   // p:path, whatever the prefix
             c.path = p.isEmpty() ? file : p.toStdString();
             if (!parseMat(a.value("transform").toString(), c.m)) { err = "a bad component transform in " + file; return false; }
+            for (int k = 9; k < 12; k++) c.m[k] *= mm;   // translations are in the file's unit too
             cur->parts.push_back(c);
         }
         else if (n == u"item" && build) {
@@ -133,6 +145,7 @@ inline bool parseModel(const std::string& file, const std::string& xml, Objects&
             it.id = a.value("objectid").toInt();
             it.printable = a.value("printable") != u"0";
             if (!parseMat(a.value("transform").toString(), it.m)) { err = "a bad build transform in " + file; return false; }
+            for (int k = 9; k < 12; k++) it.m[k] *= mm;
             build->push_back(it);
         }
     }
