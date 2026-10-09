@@ -29,7 +29,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.8";
+static const char* SWAMP_VERSION = "0.5.7";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
@@ -184,8 +184,6 @@ void SwampCoreImpl::setupDataDir() {
     m_experimentalPrint = xp && (std::string(xp) == "1" || std::string(xp) == "true");
     const char* ix = getenv("SWAMP_INDEXER");
     m_indexer = m_hub || (ix && (std::string(ix) == "1" || std::string(ix) == "true"));
-    if (const char* pf = getenv("SWAMP_PREFETCH_MS")) m_prefetchMs = std::max(500LL, atoll(pf));
-    if (const char* pc = getenv("SWAMP_PREFETCH_CHECK_MS")) m_prefetchCheckMs = std::max(100LL, atoll(pc));
     if (const char* hc = getenv("SWAMP_HUB_CHECK_MS")) m_hubCheckMs = std::max(100LL, atoll(hc));
     if (const char* ev = getenv("SWAMP_INDEX_EVERY_MS")) m_indexEveryMs = std::max(1000LL, atoll(ev));
     if (const char* ut = getenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS")) m_indexUploadTimeoutMs = std::max(1000LL, atoll(ut));
@@ -803,27 +801,10 @@ void SwampCoreImpl::startFetch(const std::string& sha, long long size) {
     bool priv = m_privateFetch.count(sha) > 0;
     std::string part = m_dataDir + "/parts/" + sha;
     std::error_code ec; fs::remove(part, ec);
-    F.inflight = true; F.since = now; F.size = size; F.session.clear(); F.seenSize = 0; F.grewAt = now;
-    if (F.cid != cid) F.prefetched = false;
-    F.cid = cid;
-    // Stage 1: let Storage fetch the CID into its own store. On Storage 3.0 a downloadToUrl that has
-    // to go to the network stalls on files of more than a block (found 2026-10-09: pictures loaded,
-    // STLs never did), while fetch() gets them from the hub. Private (Mix) fetches keep the old path.
-    if (!priv && !F.prefetched) {
-        F.prefetching = true; F.checking = false; F.checkAt = now + m_prefetchCheckMs;
-        try {
-            // fetch() answers at once (the transfer runs in the background): release the Storage slot then
-            modules().storage_module.fetchAsyncResult(cid, false, true, [this, life = m_life](logos::AsyncResult<StdLogosResult>) {
-                if (*life) onLoop([this] { std::lock_guard<std::recursive_mutex> lk(m_mtx); storageDone(); });
-            }, kStorageTimeoutMs);
-        } catch (const std::exception& e) { storageDone(); F.prefetching = false; fetchFailed(sha, std::string("fetch failed to start: ") + e.what()); }
-        return;
-    }
-    // Stage 2 (or a private fetch): write the file - from local data once prefetched
-    bool local = F.prefetched && !priv;
+    F.inflight = true; F.since = now; F.size = size; F.cid = cid; F.session.clear(); F.seenSize = 0; F.grewAt = now;
     long long attempt = now;
     try {
-        modules().storage_module.downloadToUrlAsyncResult(cid, part, local, 65536, priv, !priv,
+        modules().storage_module.downloadToUrlAsyncResult(cid, part, false, 65536, priv, !priv,
             [this, life = m_life, sha, attempt](logos::AsyncResult<StdLogosResult> ar) {
                 if (*life) onLoop([this, ar, sha, attempt] {
                     std::lock_guard<std::recursive_mutex> lk(m_mtx);
@@ -849,8 +830,6 @@ void SwampCoreImpl::fetchFailed(const std::string& sha, const std::string& why) 
     if (F.inflight && !sess.empty()) { try { modules().storage_module.downloadCancelAsyncResult(sess, [](logos::AsyncResult<StdLogosResult>) {}, kStorageTimeoutMs); } catch (...) {} }
     std::error_code ec; fs::remove(m_dataDir + "/parts/" + sha, ec);
     F.inflight = false; F.session.clear(); F.error = why;
-    F.prefetching = F.checking = false;
-    if (F.prefetched) F.prefetched = false;   // the local write failed: fetch it again next time
     fprintf(stderr, "[swamp] fetch %s: %s\n", sha.substr(0, 12).c_str(), why.c_str());
     size_t n = cidsFor(sha).size();
     // a private (Mix) fetch that keeps failing falls back to a plain one, and says so
@@ -920,28 +899,6 @@ void SwampCoreImpl::pollStorage() {
     std::vector<std::string> finished;
     for (auto& [sha, F] : m_fetch) {
         if (!F.inflight) continue;
-        if (F.prefetching) {   // stage 1: is the CID in our Storage yet?
-            if (now - F.since > m_prefetchMs) { m_stalled++; failed.push_back({sha, "no holder answered (is the publisher or a hub online?)"}); continue; }
-            if (F.checking || now < F.checkAt) continue;
-            F.checking = true;
-            std::string cid = F.cid; long long attempt = F.since;
-            try {
-                modules().storage_module.existsAsyncResult(cid, [this, life = m_life, sha, attempt](logos::AsyncResult<StdLogosResult> ar) {
-                    if (*life) onLoop([this, ar, sha, attempt] {
-                        std::lock_guard<std::recursive_mutex> lk(m_mtx);
-                        auto fi = m_fetch.find(sha);
-                        if (fi == m_fetch.end() || !fi->second.prefetching || fi->second.since != attempt) return;   // stale
-                        Fetch& G = fi->second;
-                        G.checking = false; G.checkAt = nowMs() + m_prefetchCheckMs;
-                        if (ar.ok() && ar.value.success && ar.value.value.is_boolean() && ar.value.value.get<bool>()) {
-                            G.prefetching = false; G.prefetched = true; G.inflight = false; G.nextTry = 0;
-                            startFetch(sha, G.size);   // stage 2 right away
-                        }
-                    });
-                }, kStorageTimeoutMs);
-            } catch (...) { F.checking = false; }
-            continue;
-        }
         std::error_code ec;
         std::string part = m_dataDir + "/parts/" + sha;
         long long sz = fs::exists(part, ec) ? (long long)fs::file_size(part, ec) : -1;

@@ -79,9 +79,7 @@ private:
     struct PendingUpload { std::string sha; long long since = 0; };
     struct TopicHealth { long tx = 0; long long firstTx = 0, lastRx = 0; };
     // One entry per blob being fetched: which candidate CID we're on, retries, and the transfer.
-    // prefetching: Storage is fetching the CID into its own store (fetch + exists); then the file is
-    // written from local data (downloadToUrl, local=true)
-    struct Fetch { size_t cidIdx = 0; int rounds = 0; long long nextTry = 0, since = 0, size = 0, seenSize = 0, grewAt = 0, checkAt = 0; bool inflight = false, gaveUp = false, prefetching = false, prefetched = false, checking = false; std::string cid, session, error; };
+    struct Fetch { size_t cidIdx = 0; int rounds = 0; long long nextTry = 0, since = 0, size = 0, seenSize = 0, grewAt = 0; bool inflight = false, gaveUp = false; std::string cid, session, error; };
     struct DownloadJob { std::string modelId; int v = 0; std::string dir; std::vector<std::pair<std::string, std::string>> files; std::string status, error; };
 
     // persistence + identity
@@ -146,8 +144,6 @@ private:
     std::map<std::string, HubPin> m_hubPins;   // hub only: CID -> background fetch state
     long m_hubHeld = 0;
     long long m_hubCheckMs = 60000;   // SWAMP_HUB_CHECK_MS
-    long long m_prefetchMs = 3 * 60 * 1000;   // SWAMP_PREFETCH_MS: wait this long for some holder to deliver a CID
-    long long m_prefetchCheckMs = 3000;       // SWAMP_PREFETCH_CHECK_MS: ...asking Storage whether it has it this often
     swamp::json m_slicerInstall;                      // {stage: downloading|unpacking|checking|done|failed, bytes, total, message, fix}
     std::atomic<long long> m_slicerBytes{0};
     swamp::json managedSlicer() const;

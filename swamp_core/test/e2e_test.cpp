@@ -48,9 +48,7 @@ int main(int argc, char** argv) {
     setenv("SWAMP_TICK_MS", "60", 1);
     setenv("SWAMP_INDEX_EVERY_MS", "1000", 1);   // the hub indexes every second here
     setenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS", "8000", 1);
-    setenv("SWAMP_HUB_CHECK_MS", "300", 1);
-    setenv("SWAMP_PREFETCH_MS", "1500", 1);         // a CID nobody delivers is given up after 1.5 s here
-    setenv("SWAMP_PREFETCH_CHECK_MS", "150", 1);   // the hub asks Storage whether a fetch landed after 0.3 s   // ...and gives up on a stuck shard upload after 8 s
+    setenv("SWAMP_HUB_CHECK_MS", "300", 1);   // the hub asks Storage whether a fetch landed after 0.3 s   // ...and gives up on a stuck shard upload after 8 s
     setenv("SWAMP_INCLUSION_EVERY_MS", "1000", 1);   // creators audit indexers every second
     setenv("SWAMP_INCLUSION_GRACE_MS", "0", 1);
     setenv("SWAMP_OMISSION_CONFIRM_MS", "1500", 1);
