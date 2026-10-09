@@ -95,8 +95,7 @@ int main(int argc, char** argv) {
     CHECK(json::parse(alice->core.listModels(json{{"tag", "Bracelet"}}.dump()))["models"].size() == 1, "tag filter (case-insensitive)");
 
     // the hub caches everything; then alice goes offline and bob still downloads, verified
-    // by fetching them over Storage or by the creator's hand-off over Messaging, whichever is first
-    CHECK(waitFor([&] { json c = hub->snap()["counters"]; return c["fetched"].get<int>() + c["hubReceived"].get<int>() >= 3; }, 8000), "hub cached the STL, thumbnail and fingerprint");
+    CHECK(waitFor([&] { return hub->snap()["counters"]["fetched"].get<int>() >= 3; }, 8000), "hub cached the STL, thumbnail and fingerprint");
     alice->store.online = false; alice->bus.online = false;
     bob->call(bob->core.download(mid, "1"));
     std::string dir;
@@ -430,57 +429,9 @@ int main(int argc, char** argv) {
         FakeLoamBus::get().nodes.push_back(&dave->bus); FakeStoreNet::get().nodes.push_back(&dave->store);
         dave->core.fakeStart();
         CHECK(waitFor([&] { return dave->snap()["status"] == "Connected"; }, 4000), "lost Connected event: status poll brings the node up");
-        CHECK(waitFor([&] { return json::parse(dave->core.listModels("{}"))["total"].get<int>() >= 2; }, 60000), "...and it catches up (has " << json::parse(dave->core.listModels("{}"))["total"] << ")");
+        CHECK(waitFor([&] { return json::parse(dave->core.listModels("{}"))["total"].get<int>() >= 2; }, 20000), "...and it catches up (has " << json::parse(dave->core.listModels("{}"))["total"] << ")");
     }
 
-    // hand-off: a publisher behind NAT (nobody can fetch from its Storage) streams its files to the
-    // hub over Messaging; the hub checks and re-uploads them; a fresh node downloads with the
-    // publisher gone (the case real home users are in, 2026-10-09)
-    {
-        // a file no one else has published (the test meshes are shared by the models above)
-        std::string natStl = root + "/behind-a-router.stl";
-        { std::ifstream in(stl2, std::ios::binary); std::stringstream ss; ss << in.rdbuf(); std::string b = ss.str(); b += "\nbehind a router\n"; std::ofstream(natStl, std::ios::binary) << b; }
-        Peer* natp = spawn("natp");
-        natp->store.online = false;   // its Storage can't be reached by anyone
-        pump(1300);
-        CHECK(waitFor([&] { return natp->snap()["index"]["known"].get<int>() >= 1; }, 15000), "the NAT-ed publisher knows a hub (its index manifest)");
-        json pub = natp->call(natp->core.publish(json{{"title", "Behind a router"}, {"licence", "CC0-1.0"}, {"category", "tools"}, {"files", {{{"path", natStl}}}}}.dump()));
-        std::string nid = pub.value("modelId", "");
-        long before = hub->snap()["counters"]["hubReceived"].get<long>();
-        // (its thumbnail and fingerprint equal an earlier model's - same geometry - which the hub
-        // already holds: only the STL itself is new)
-        CHECK(waitFor([&] { return hub->snap()["counters"]["hubReceived"].get<long>() >= before + 1; }, 30000),
-              "the hub received the publisher's STL by hand-off (natp " + natp->snap()["counters"].dump() + ")");
-        CHECK(hub->snap()["counters"]["handoffRejected"] == 0, "...all of them matched the catalogue");
-        CHECK(natp->snap()["counters"]["handoffFrames"].get<int>() > 0, "the publisher sent its files as frames");
-        long sentFrames = natp->snap()["counters"]["handoffFrames"].get<long>();
-        pump(8000);
-        CHECK(natp->snap()["counters"]["handoffFrames"].get<long>() == sentFrames, "...and stops once the hub announces it holds them");
-        natp->bus.online = false;     // the publisher goes away completely
-        Peer* fresh = spawn("fresh");
-        pump(1300);
-        fresh->call(fresh->core.resync());
-        CHECK(waitFor([&] { return json::parse(fresh->core.getModel(nid)).value("ok", false); }, 60000), "a fresh node gets the model");
-        fresh->call(fresh->core.download(nid, "1"));
-        std::string fdir;
-        CHECK(waitFor([&] { json m = json::parse(fresh->core.getModel(nid))["model"]; json dl = m["versions"][0].value("download", json::object()); fdir = dl.value("dir", ""); return dl.value("status", "") == "done"; }, 15000),
-              "...and downloads it from the hub, with the publisher offline");
-        std::string a, b;
-        { std::ifstream f1(natStl, std::ios::binary), f2(fdir + "/" + fs::path(natStl).filename().string(), std::ios::binary); std::stringstream s1, s2; s1 << f1.rdbuf(); s2 << f2.rdbuf(); a = s1.str(); b = s2.str(); }
-        CHECK(!a.empty() && a == b, "...byte-identical");
-        // a hub keeps nothing it didn't check: a frame for a file no model lists is dropped
-        long rej = hub->snap()["counters"]["handoffRejected"].get<long>();
-        (void)rej;
-        std::string junk(100, 'x'), jsha = swamp::sha256Hex(junk);
-        for (auto* n : FakeLoamBus::get().nodes) if (n == &hub->bus && n->onRecv)
-            n->onRecv(swamp::HUB_TOPIC, "x", FakeLoamBus::b64(json{{"t", "blob"}, {"s", jsha}, {"z", 100}, {"i", 0}, {"n", 1}, {"d", FakeLoamBus::b64(junk)}}.dump()), 0);
-        long recv = hub->snap()["counters"]["hubReceived"].get<long>();
-        pump(500);
-        CHECK(hub->snap()["counters"]["hubReceived"].get<long>() == recv && !fs::exists(root + "/hub/data/files/" + jsha),
-              "a file no model lists isn't kept (it waits, unlisted, until it expires)");
-        auto& bn = FakeLoamBus::get().nodes; bn.erase(std::remove(bn.begin(), bn.end(), &natp->bus), bn.end()); bn.erase(std::remove(bn.begin(), bn.end(), &fresh->bus), bn.end());
-        auto& sn = FakeStoreNet::get().nodes; sn.erase(std::remove(sn.begin(), sn.end(), &natp->store), sn.end()); sn.erase(std::remove(sn.begin(), sn.end(), &fresh->store), sn.end());
-    }
     // share links: a node that follows neither the model's category nor has the model opens it from a link
     {
         std::string sharedId = sharedToolId;

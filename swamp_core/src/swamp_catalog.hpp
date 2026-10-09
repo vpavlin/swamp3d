@@ -20,8 +20,6 @@ inline const std::string DOMAIN = "swamp";
 // Topics (ADR 0014). Nobody mirrors the whole catalogue: a model and everything about it lives on
 // its category's topic; profiles live on one small people topic.
 inline const std::string PEOPLE_TOPIC = "/swamp/2/people/proto";
-// Files handed to hubs (only hubs join it; publishers send without joining). See hubHandoff().
-inline const std::string HUB_TOPIC = "/swamp/2/hub-files/proto";
 // Waku content topics are /app/version/name/encoding (or /generation/app/version/name/encoding with
 // a numeric generation): a 5-part "/swamp/2/cat/x/proto" is rejected by Delivery's channels
 // ("generation should be a numeric value") - found in review 2026-10-07. Four parts only.
