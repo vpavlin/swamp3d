@@ -1333,8 +1333,12 @@ void SwampCoreImpl::hubSweep() {
     long long now = nowMs();
     int active = 0;
     for (const auto& [sha, p] : m_hubPulls) active += p.stage == HubPull::Write;
-    for (const auto& [id, m] : m_cat.models) {
-        if (m.retracted) continue;
+    // newest models first: their publishers are the ones most likely online right now
+    std::vector<const Model*> order;
+    for (const auto& [id, m] : m_cat.models) if (!m.retracted) order.push_back(&m);
+    std::sort(order.begin(), order.end(), [](const Model* a, const Model* b) { return a->created > b->created; });
+    for (const Model* mp : order) {
+        const Model& m = *mp;
         for (const auto& v : m.versions) {
             json blobs = json::array();
             for (const char* k : {"files", "images"}) if (v.contains(k)) for (const auto& f : v[k]) blobs.push_back(f);
