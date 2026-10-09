@@ -699,7 +699,11 @@ void SwampCoreImpl::onStatus(const std::string& s) {
 void SwampCoreImpl::startTransport() {
     if (m_transportStarted) return;
     m_transportStarted = true;
-    json cfg = json{{"mode", "Core"}, {"preset", "logos.test"}, {"useChannels", true}};
+    // useChannels:false = plain relay: delivery 0.3's reliable channels hold back every frame whose
+    // causal history this node never saw ("SDS message has missing dependencies" -> "stash full"),
+    // which silently dropped Swamp traffic between nodes with history (2026-10-09). Swamp's own
+    // RBSR catch-up is the reliability layer; loam_core still unwraps channel frames from older peers.
+    json cfg = json{{"mode", "Core"}, {"preset", "logos.test"}, {"useChannels", false}};
     if (const char* env = getenv("SWAMP_DELIVERY_CFG")) {
         json p = json::parse(std::string(env), nullptr, false);
         if (p.is_object()) cfg = p;
