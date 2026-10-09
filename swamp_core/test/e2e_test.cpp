@@ -47,7 +47,8 @@ int main(int argc, char** argv) {
     fs::remove_all(root);
     setenv("SWAMP_TICK_MS", "60", 1);
     setenv("SWAMP_INDEX_EVERY_MS", "1000", 1);   // the hub indexes every second here
-    setenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS", "8000", 1);   // ...and gives up on a stuck shard upload after 8 s
+    setenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS", "8000", 1);
+    setenv("SWAMP_HUB_CHECK_MS", "300", 1);   // the hub asks Storage whether a fetch landed after 0.3 s   // ...and gives up on a stuck shard upload after 8 s
     setenv("SWAMP_INCLUSION_EVERY_MS", "1000", 1);   // creators audit indexers every second
     setenv("SWAMP_INCLUSION_GRACE_MS", "0", 1);
     setenv("SWAMP_OMISSION_CONFIRM_MS", "1500", 1);
@@ -95,7 +96,9 @@ int main(int argc, char** argv) {
     CHECK(json::parse(alice->core.listModels(json{{"tag", "Bracelet"}}.dump()))["models"].size() == 1, "tag filter (case-insensitive)");
 
     // the hub caches everything; then alice goes offline and bob still downloads, verified
-    CHECK(waitFor([&] { return hub->snap()["counters"]["fetched"].get<int>() >= 3; }, 8000), "hub cached the STL, thumbnail and fingerprint");
+    // the hub pins them in its Storage node (background fetch + exists), it doesn't download them
+    CHECK(waitFor([&] { return hub->snap()["counters"]["hubHeld"].get<int>() >= 3; }, 8000), "hub holds the STL, thumbnail and fingerprint in its Storage node");
+    CHECK(hub->snap()["counters"]["fetched"].get<int>() == 0, "...without downloading them to disk");
     alice->store.online = false; alice->bus.online = false;
     bob->call(bob->core.download(mid, "1"));
     std::string dir;
