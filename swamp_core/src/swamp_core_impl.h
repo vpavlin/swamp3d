@@ -140,6 +140,22 @@ private:
     std::vector<swamp::json> m_bambuSlicers;
     swamp::json m_slicer;
     long long m_slicerAt = 0;
+    // hand-off to hubs (see hubHandoff)
+    struct Handoff { std::string sha; long long size = 0; int i = 0, n = 0; };
+    struct Assembly { std::vector<std::string> parts; size_t got = 0; long long lastAt = 0; };
+    Handoff m_handoff;
+    std::map<std::string, long long> m_handoffSent;            // sha -> when last fully sent
+    std::map<std::string, std::set<std::string>> m_cidsFrom;   // sha -> who announced CIDs for it
+    std::map<std::string, Assembly> m_assembly;                // hub: files being put back together
+    std::set<std::string> m_hubBlobs;                          // hub: files received by hand-off
+    long m_handoffFrames = 0, m_hubReceived = 0, m_handoffRejected = 0;
+    void hubHandoff();
+    void onHubFrame(const swamp::json& f);
+    void acceptHandoff(const std::string& sha, const std::string& all);
+    std::map<std::string, std::pair<std::string, long long>> m_unlisted;   // hub: sha -> (bytes, when)
+    void sendUnjoined(const std::string& topic, const swamp::json& frame);
+    long long listedSize(const std::string& sha) const;
+    bool heldByHub(const std::string& sha) const;
     swamp::json m_slicerInstall;                      // {stage: downloading|unpacking|checking|done|failed, bytes, total, message, fix}
     std::atomic<long long> m_slicerBytes{0};
     swamp::json managedSlicer() const;

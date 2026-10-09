@@ -29,7 +29,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.6";
+static const char* SWAMP_VERSION = "0.5.9";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
@@ -54,6 +54,17 @@ static constexpr int kPreviewFetches = 2;
 static constexpr long long kPreviewMaxBytes = 2 * 1024 * 1024;
 static constexpr long long kWantImgMs = 10 * 60 * 1000;    // a picture stays wanted this long after the view asked
 static constexpr int kHubConcurrency = 3;
+// Hand-off to hubs: home nodes can't be dialled, so a hub can't pull their files over Storage (it
+// gets the manifest, never the blocks - found on the VPS hub 2026-10-09). The publisher streams its
+// own files to the hub over Messaging instead; the hub checks them against the catalogue and
+// uploads them into its own Storage (same file name, so the same CID), and serves them from there.
+static constexpr size_t kHandoffChunk = 32 * 1024;            // raw bytes per frame (~44 KB base64)
+static constexpr long long kHandoffMaxBytes = 64LL << 20;      // files above this stay publisher-only
+static constexpr int kHandoffFramesPerTick = 4;                // ~64 KB/s at the 2 s tick
+static constexpr long long kHandoffEveryMs = 20 * 60 * 1000;  // resend a file a hub hasn't confirmed
+static constexpr size_t kHubMaxAssemblies = 16;
+static constexpr long long kHubAssemblyTtlMs = 30 * 60 * 1000;
+static constexpr size_t kHubMaxUnlistedBytes = 128u << 20;   // hand-offs that arrived before their model
 static constexpr long long kImageMaxBytes = 16 * 1024 * 1024;
 static constexpr size_t kImageCacheFiles = 300;
 static constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
@@ -327,6 +338,8 @@ void SwampCoreImpl::refold() { m_cat = fold(m_log, true); m_dirty = false; }
 bool SwampCoreImpl::ingest(const Event& e) {
     if (m_logIds.count(e.id) || !admissible(e)) return false;   // duplicates don't pay for a verify
     m_logIds.insert(e.id);
+    if (e.type == "blob.cids" && e.payload.contains("cids") && e.payload["cids"].is_object())
+        for (auto it = e.payload["cids"].begin(); it != e.payload["cids"].end(); ++it) m_cidsFrom[it.key()].insert(e.dev);
     m_log.push_back(e);
     // stay causally after what we've seen, but don't let one future-dated event drag our clock along
     if (e.hlc.wall <= nowMs() + kMaxClockLeadMs) m_id.clock.receive(e.hlc);
@@ -432,6 +445,125 @@ void SwampCoreImpl::sendFrame(const std::string& topic, const json& frame) {
     catch (const std::exception& e) { fprintf(stderr, "[swamp] send failed: %s\n", e.what()); }
 }
 
+// Send on a topic without joining it (publishers -> HUB_TOPIC: joining would mean receiving
+// everyone's files).
+void SwampCoreImpl::sendUnjoined(const std::string& topic, const json& frame) {
+    if (!m_ready || topic.empty()) return;
+    m_tx++;
+    try { modules().loam_core.sendSealedAsync(topic, b64std(frame.dump()), [](std::string) {}); }
+    catch (const std::exception& e) { fprintf(stderr, "[swamp] send failed: %s\n", e.what()); }
+}
+
+// The size the catalogue declares for a blob: 0 = no model lists it; -1 = listed without a size
+// (fingerprints) - the sha256 check alone decides then.
+long long SwampCoreImpl::listedSize(const std::string& sha) const {
+    auto sizeOf = [](const json& f) { long long z = f.value("size", 0LL); return z > 0 ? z : -1LL; };
+    for (const auto& [id, m] : m_cat.models) {
+        if (m.retracted) continue;
+        for (const auto& v : m.versions) {
+            for (const char* k : {"files", "images"}) if (v.contains(k)) for (const auto& f : v[k]) if (f.value("sha256", "") == sha) return sizeOf(f);
+            if (v.contains("fp") && v["fp"].is_object() && v["fp"].value("sha256", "") == sha) return sizeOf(v["fp"]);
+        }
+    }
+    return 0;
+}
+// A hub (any node publishing index manifests) announced a CID for this blob = it holds a copy.
+bool SwampCoreImpl::heldByHub(const std::string& sha) const {
+    auto it = m_cidsFrom.find(sha);
+    if (it == m_cidsFrom.end()) return false;
+    for (const auto& who : it->second) if (who != m_id.address && m_cat.indexes.count(who)) return true;
+    return false;
+}
+
+// PUBLISHER: stream my own files to the hubs, a few frames per tick, until a hub announces it holds
+// them (its signed blob.cids event).
+void SwampCoreImpl::hubHandoff() {
+    if (!m_ready || m_hub) return;
+    bool hubKnown = false;
+    for (const auto& [who, mf] : m_cat.indexes) if (who != m_id.address) { hubKnown = true; break; }
+    if (!hubKnown) return;
+    long long now = nowMs();
+    if (m_handoff.sha.empty()) {
+        for (const auto& sha : myBlobs()) {
+            if (sha.empty() || heldByHub(sha) || !haveBlob(sha)) continue;
+            auto t = m_handoffSent.find(sha);
+            if (t != m_handoffSent.end() && now - t->second < kHandoffEveryMs) continue;
+            std::error_code ec;
+            long long size = (long long)fs::file_size(blobPath(sha), ec);
+            if (ec || size <= 0 || size > kHandoffMaxBytes) { m_handoffSent[sha] = now; continue; }
+            m_handoff = Handoff{sha, size, 0, (int)((size + (long long)kHandoffChunk - 1) / (long long)kHandoffChunk)};
+            fprintf(stderr, "[swamp] %s hands %s (%lld bytes, %d frames) to the hubs\n", m_id.address.substr(0, 8).c_str(), sha.substr(0, 12).c_str(), size, m_handoff.n);
+            break;
+        }
+        if (m_handoff.sha.empty()) return;
+    }
+    std::ifstream f(blobPath(m_handoff.sha), std::ios::binary);
+    if (!f) { m_handoffSent[m_handoff.sha] = now; m_handoff = Handoff{}; return; }
+    for (int k = 0; k < kHandoffFramesPerTick && m_handoff.i < m_handoff.n; k++, m_handoff.i++) {
+        std::string chunk(kHandoffChunk, '\0');
+        f.seekg((std::streamoff)m_handoff.i * (std::streamoff)kHandoffChunk);
+        f.read(chunk.data(), (std::streamsize)kHandoffChunk);
+        chunk.resize((size_t)f.gcount());
+        f.clear();
+        sendUnjoined(HUB_TOPIC, json{{"t", "blob"}, {"s", m_handoff.sha}, {"z", m_handoff.size}, {"i", m_handoff.i}, {"n", m_handoff.n}, {"d", b64std(chunk)}});
+        m_handoffFrames++;
+    }
+    if (m_handoff.i >= m_handoff.n) {
+        fprintf(stderr, "[swamp] handed %s (%lld bytes) to the hubs\n", m_handoff.sha.substr(0, 12).c_str(), m_handoff.size);
+        m_handoffSent[m_handoff.sha] = now; m_handoff = Handoff{};
+    }
+}
+
+// HUB: put a handed-off file back together; keep it only if a model lists it at that size and the
+// bytes hash to the listed sha256. Then upload it into our own Storage (and announce its CID).
+void SwampCoreImpl::onHubFrame(const json& f) {
+    if (!m_hub || str(f, "t") != "blob") return;
+    std::string sha = str(f, "s"), d = str(f, "d");
+    long long z = num(f, "z"), i = num(f, "i"), n = num(f, "n");
+    long long want = (z + (long long)kHandoffChunk - 1) / (long long)kHandoffChunk;
+    if (!isHex(sha, 64) || z <= 0 || z > kHandoffMaxBytes || n != want || i < 0 || i >= n || haveBlob(sha)) return;
+    long long listed = listedSize(sha);
+    if (listed > 0 && listed != z) {   // the catalogue lists it at another size
+        m_handoffRejected++;
+        fprintf(stderr, "[swamp] hub: refused hand-off of %s (%lld bytes; the catalogue lists %lld)\n", sha.substr(0, 12).c_str(), z, listed);
+        return;
+    }
+    long long now = nowMs();
+    for (auto it = m_assembly.begin(); it != m_assembly.end();) it = now - it->second.lastAt > kHubAssemblyTtlMs ? m_assembly.erase(it) : std::next(it);
+    if (!m_assembly.count(sha) && m_assembly.size() >= kHubMaxAssemblies) return;
+    Assembly& A = m_assembly[sha];
+    if (A.parts.empty()) A.parts.resize((size_t)n);
+    A.lastAt = now;
+    if (!A.parts[(size_t)i].empty()) return;   // a duplicate
+    std::string bytes;
+    if (!unb64(d, bytes)) { m_handoffRejected++; return; }
+    size_t expect = i + 1 < n ? kHandoffChunk : (size_t)(z - (long long)kHandoffChunk * (n - 1));
+    if (bytes.size() != expect) { m_handoffRejected++; return; }
+    A.parts[(size_t)i] = std::move(bytes);
+    if (++A.got < (size_t)n) return;
+    std::string all;
+    all.reserve((size_t)z);
+    for (const auto& p : A.parts) all += p;
+    m_assembly.erase(sha);
+    if (sha256Hex(all) != sha) { m_handoffRejected++; fprintf(stderr, "[swamp] hub: handed-off %s didn't match its hash - dropped\n", sha.substr(0, 12).c_str()); return; }
+    if (listedSize(sha) == 0) {
+        // the publisher is often faster than the catalogue: keep it a while, take it once a model lists it
+        size_t parked = 0; for (const auto& [k, u] : m_unlisted) parked += u.first.size();
+        if (parked + all.size() > kHubMaxUnlistedBytes) { m_handoffRejected++; return; }
+        m_unlisted[sha] = {std::move(all), now};
+        return;
+    }
+    acceptHandoff(sha, all);
+}
+void SwampCoreImpl::acceptHandoff(const std::string& sha, const std::string& all) {
+    storeBlob(all);
+    m_hubBlobs.insert(sha);
+    m_hubReceived++;
+    fprintf(stderr, "[swamp] hub: received %s (%zu bytes); uploading it\n", sha.substr(0, 12).c_str(), all.size());
+    uploadBlob(sha);
+    publishState();
+}
+
 // A catch-up frame from the wire, checked before logos_sync::catchup::respond() touches it
 // (respond() assumes well-formed input and throws on anything else).
 static bool wellFormedCatchup(const json& f) {
@@ -481,6 +613,7 @@ void SwampCoreImpl::onFrame(const std::string& topic, const std::string& payload
 }
 
 void SwampCoreImpl::handleFrame(const std::string& topic, const json& f, bool live) {
+    if (topic == HUB_TOPIC) { onHubFrame(f); return; }
     const std::string t = str(f, "t");
     bool subscribed = isSubscribedTopic(topic);
     if (t == "ev" || t == "evs") {
@@ -555,6 +688,7 @@ void SwampCoreImpl::onStatus(const std::string& s) {
         m_ready = true;
         m_readyAt = nowMs();
         for (const auto& t : subscribedTopics()) ensureJoined(t);
+        if (m_hub) ensureJoined(HUB_TOPIC);
         for (int ms : {3000, 10000, 25000}) QTimer::singleShot(ms, m_timer, [this] { std::lock_guard<std::recursive_mutex> l(m_mtx); catchupRound(); });
     } else if (s == "Connected") {
         catchupRound();
@@ -691,6 +825,7 @@ void SwampCoreImpl::retryUploads() {
     long long now = nowMs();
     std::set<std::string> mine = myBlobs();
     mine.insert(m_indexShas.begin(), m_indexShas.end());
+    mine.insert(m_hubBlobs.begin(), m_hubBlobs.end());
     for (const auto& sha : mine) {
         if (m_myCids.count(sha)) continue;
         auto t = m_upTried.find(sha);
@@ -1355,6 +1490,14 @@ void SwampCoreImpl::tick() {
             // a download the user asked for goes first: no background fetches until it's done
             if (!jobWaiting()) { fetchPreviews(); hubSweep(); }
         }
+        hubHandoff();
+        if (m_hub && !m_unlisted.empty()) {   // parked hand-offs: listed by now, or expired?
+            for (auto it = m_unlisted.begin(); it != m_unlisted.end();) {
+                if (listedSize(it->first) != 0) { std::string sha = it->first, all = std::move(it->second.first); it = m_unlisted.erase(it); acceptHandoff(sha, all); }
+                else if (now - it->second.second > kHubAssemblyTtlMs) { m_handoffRejected++; it = m_unlisted.erase(it); }
+                else ++it;
+            }
+        }
         flushAnnouncements();
         indexTick();
         checkInclusion();
@@ -1417,7 +1560,7 @@ std::string SwampCoreImpl::snapshot() {
                            {"omissions", omissionsJson()}, {"suspects", suspectsJson()}, {"excludedMine", excludedMineJson()}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
                 {"catalog", {{"events", m_log.size()}, {"models", visible}, {"rejected", m_cat.rejected}, {"cids", m_cat.cids.size()}}},
-                {"counters", {{"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
+                {"counters", {{"handoffFrames", m_handoffFrames}, {"hubReceived", m_hubReceived}, {"handoffRejected", m_handoffRejected}, {"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
                               {"fetched", m_fetched}, {"verifyFailed", m_verifyFailed}, {"tooBig", m_tooBig}, {"served", m_servedEvents}, {"throttled", m_throttled}, {"staleCatchup", m_staleCatchup}, {"stalled", m_stalled},
                               {"uploading", m_upSessions.size()}, {"downloading", inflight}, {"toAnnounce", m_toAnnounce.size()}}}}.dump();
 }
