@@ -147,6 +147,7 @@ private:
     long long m_hubPullRetryMs = 30000;   // SWAMP_HUB_PULL_RETRY_MS: first retry delay (doubles every 3 tries, max 30 min)
     long long m_hubPullCheckMs = 20000;   // SWAMP_HUB_PULL_CHECK_MS: after a fetch, try writing the file from local data
     long long m_hubPullWriteMs = 20000;   // SWAMP_HUB_PULL_WRITE_MS: a local write that hasn't finished by then = blocks missing
+    long long m_stallMs = 2 * 60 * 1000;   // SWAMP_STALL_MS: a download that stops growing this long is cancelled
     void hubPullStep(const std::string& sha, HubPull& p, long long now, int& active);
     swamp::json m_slicerInstall;                      // {stage: downloading|unpacking|checking|done|failed, bytes, total, message, fix}
     std::atomic<long long> m_slicerBytes{0};

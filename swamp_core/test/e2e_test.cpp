@@ -50,7 +50,8 @@ int main(int argc, char** argv) {
     setenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS", "8000", 1);
     setenv("SWAMP_HUB_PULL_CHECK_MS", "200", 1);    // the hub's fetch -> local-write cycle, sped up
     setenv("SWAMP_HUB_PULL_WRITE_MS", "400", 1);
-    setenv("SWAMP_HUB_PULL_RETRY_MS", "300", 1);   // ...and gives up on a stuck shard upload after 8 s
+    setenv("SWAMP_HUB_PULL_RETRY_MS", "300", 1);
+    setenv("SWAMP_STALL_MS", "1500", 1);   // a download with no holder is called stalled after 1.5 s
     setenv("SWAMP_INCLUSION_EVERY_MS", "1000", 1);   // creators audit indexers every second
     setenv("SWAMP_INCLUSION_GRACE_MS", "0", 1);
     setenv("SWAMP_OMISSION_CONFIRM_MS", "1500", 1);
@@ -460,6 +461,51 @@ int main(int argc, char** argv) {
         auto& bn = FakeLoamBus::get().nodes; bn.erase(std::remove(bn.begin(), bn.end(), &lena->bus), bn.end());
         auto& sn = FakeStoreNet::get().nodes; sn.erase(std::remove(sn.begin(), sn.end(), &lena->store), sn.end());
     }
+    // pictures still load while file downloads hang on an offline publisher (seen on the Duet:
+    // two stuck STLs held both picture slots, so no thumbnail was ever fetched)
+    {
+        Peer* pat = spawn("pat");
+        Peer* mia = spawn("mia");
+        mia->store.hangMissing = true;
+        pump(1500);
+        auto& hb = FakeLoamBus::get().nodes;   // keep the hub from caching pat's files
+        hb.erase(std::remove(hb.begin(), hb.end(), &hub->bus), hb.end());
+        std::vector<std::string> gone;
+        for (int i = 0; i < 2; i++) {
+            // files only pat holds: twist.stl with its own 80-byte header
+            std::string bytes; { std::ifstream f(stl2, std::ios::binary); std::stringstream ss; ss << f.rdbuf(); bytes = ss.str(); }
+            std::string hdr = "gone " + std::to_string(i); bytes.replace(0, hdr.size(), hdr);
+            std::string gp = root + "/gone" + std::to_string(i) + ".stl"; { std::ofstream o(gp, std::ios::binary); o << bytes; }
+            json r = pat->call(pat->core.publish(json{{"title", "Gone model " + std::to_string(i)}, {"licence", "CC0-1.0"}, {"tags", {"fashion"}},
+                {"files", {{{"path", gp}}}}}.dump()));
+            gone.push_back(r.value("modelId", ""));
+        }
+        waitFor([&] { return pat->snap()["counters"].value("toAnnounce", 1) == 0 && pat->snap()["counters"].value("uploading", 1) == 0; }, 5000);
+        pump(800);   // CIDs announced
+        pat->store.online = false;   // nobody else holds these files
+        for (auto& g : gone) {
+            json m;
+            CHECK(waitFor([&] { m = json::parse(mia->core.getModel(g)); return m.value("ok", false); }, 8000), "mia sees a model whose files nobody can serve");
+            mia->call(mia->core.download(g, "1"));
+        }
+        pump(500);
+        CHECK(mia->snap()["counters"].value("downloading", 0) >= 2, "two downloads hang (" + mia->snap()["counters"].dump() + ")");
+        std::string vdirM = root + "/pluginsM/swamp"; fs::create_directories(vdirM);
+        json am;
+        waitFor([&] { am = json::parse(mia->core.getModel(mid)); return am.value("ok", false); }, 15000);
+        am = am["model"];
+        std::string tshaM = am["versions"][0]["images"][0]["sha256"];
+        mia->core.cacheImage(tshaM, vdirM);
+        CHECK(waitFor([&] { return json::parse(mia->core.cacheImage(tshaM, vdirM)).value("ok", false); }, 12000),
+              "...and a thumbnail still arrives (pictures don't wait behind hung file downloads)");
+        pat->store.online = true;
+        hb.push_back(&hub->bus);
+        for (Peer* p : {pat, mia}) {
+            auto& bn = FakeLoamBus::get().nodes; bn.erase(std::remove(bn.begin(), bn.end(), &p->bus), bn.end());
+            auto& sn = FakeStoreNet::get().nodes; sn.erase(std::remove(sn.begin(), sn.end(), &p->store), sn.end());
+        }
+    }
+
     std::cout << passes << " passed, " << fails << " failed\n";
     return fails ? 1 : 0;
 }

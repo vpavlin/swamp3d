@@ -29,14 +29,13 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.9";
+static const char* SWAMP_VERSION = "0.5.10";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
 static constexpr long long kCatchupFreshMs = 30000, kCatchupFreshForMs = 5 * 60 * 1000;   // the first minutes after coming up
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
 static constexpr long long kTransferStaleMs = 10 * 60 * 1000;
-static constexpr long long kStallMs = 2 * 60 * 1000;          // a download that stops growing this long is cancelled
 static constexpr long long kUploadRetryMs = 60000;
 static constexpr long long kManifestPollMs = 5000;
 static constexpr long long kReannounceMs = 10 * 60 * 1000;
@@ -186,6 +185,7 @@ void SwampCoreImpl::setupDataDir() {
     if (const char* hp = getenv("SWAMP_HUB_PULL_RETRY_MS")) m_hubPullRetryMs = std::max(100LL, atoll(hp));
     if (const char* hc = getenv("SWAMP_HUB_PULL_CHECK_MS")) m_hubPullCheckMs = std::max(100LL, atoll(hc));
     if (const char* hw = getenv("SWAMP_HUB_PULL_WRITE_MS")) m_hubPullWriteMs = std::max(100LL, atoll(hw));
+    if (const char* st = getenv("SWAMP_STALL_MS")) m_stallMs = std::max(100LL, atoll(st));
     if (const char* ev = getenv("SWAMP_INDEX_EVERY_MS")) m_indexEveryMs = std::max(1000LL, atoll(ev));
     if (const char* ut = getenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS")) m_indexUploadTimeoutMs = std::max(1000LL, atoll(ut));
     if (const char* ie = getenv("SWAMP_INCLUSION_EVERY_MS")) m_inclusionEveryMs = std::max(1000LL, atoll(ie));
@@ -636,6 +636,10 @@ bool SwampCoreImpl::jobWaiting() {
         if (j.status == "done" || j.status == "failed") continue;
         for (const auto& [sha, name] : j.files) {
             if (haveBlob(sha) || !m_cat.cids.count(sha)) continue;
+            // a file that already failed from every holder is a background retry now (its
+            // publisher may never come back): it mustn't hold up the pictures for good
+            auto fi = m_fetch.find(sha);
+            if (fi != m_fetch.end() && fi->second.rounds >= 1) continue;
             return true;   // even while it backs off: a preview start would hold Storage ~30 s
         }
     }
@@ -911,7 +915,7 @@ void SwampCoreImpl::pollStorage() {
         else if (sz > F.size) { m_tooBig++; failed.push_back({sha, "the download is larger than the published size - cut off"}); }
         else if (now - F.since > kTransferStaleMs) failed.push_back({sha, "timed out"});
         else if (sz > F.seenSize) { F.seenSize = sz; F.grewAt = now; }
-        else if (now - F.grewAt > kStallMs) { m_stalled++; failed.push_back({sha, "the transfer stalled (no holder answering)"}); }
+        else if (now - F.grewAt > m_stallMs) { m_stalled++; failed.push_back({sha, "the transfer stalled (no holder answering)"}); }
     }
     for (const auto& s : finished) finishFetched(s);
     for (const auto& [s, why] : failed) fetchFailed(s, why);
@@ -1302,8 +1306,10 @@ long long SwampCoreImpl::imageSize(const std::string& sha) {
 
 // Pictures the view asked for in the last few minutes (cacheImage), small ones only.
 void SwampCoreImpl::fetchPreviews() {
+    // count only pictures in flight: file downloads stalled on an offline publisher must not
+    // starve the thumbnails (seen on the Duet: two stuck STLs, no picture ever tried)
     int inflight = 0;
-    for (const auto& [s, f] : m_fetch) inflight += f.inflight;
+    for (const auto& [s, f] : m_fetch) if (f.inflight && imageSize(s) > 0) inflight++;
     long long now = nowMs();
     for (auto it = m_wantImg.begin(); it != m_wantImg.end();) {
         const std::string sha = it->first;

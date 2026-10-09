@@ -11,6 +11,7 @@
 struct FakeStoreNode {
     std::string name;
     bool online = true, dropEvents = false;
+    bool hangMissing = false;   // a download with no holder hangs (like the real one) instead of failing at once
     FakeStorage::EvFn onUp, onDown;
     std::map<std::string, std::string> held;      // cid -> bytes
     std::vector<LogosMap> manifests;             // what this node uploaded
@@ -60,6 +61,7 @@ inline void FakeStorage::downloadToUrlAsyncResult(const std::string& cid, const 
     FakeStoreNet::later(40, [n, cid, path, advertise, sess, local] {
         // local=true reads only this node's own store, like the real one
         const std::string* src = local ? (n->held.count(cid) ? &n->held[cid] : nullptr) : FakeStoreNet::get().find(cid);
+        if (!src && n->hangMissing) return;
         if (!src) { if (n->onDown && !n->dropEvents) n->onDown(LogosMap{{"sessionId", sess}, {"success", false}, {"error", "no provider"}}.dump()); return; }
         std::string bytes = *src;
         { std::ofstream o(path, std::ios::binary); o << bytes; }
