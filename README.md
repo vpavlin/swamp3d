@@ -70,7 +70,7 @@ public IP:
 
     sudo PUBLIC_IP=<ip> LOGOSCTL_APPIMAGE=logosctl-x86_64.AppImage LGX_DIR=<dir with the .lgx> hub/vps-hub.sh
 
-It runs as `swamp-hub.service` (logosctl 0.3.1, `SWAMP_HUB=1`), with Storage reachable on TCP 8299
+It runs as `swamp-hub.service` (logosctl 0.3.1, `SWAMP_HUB=1`), with Storage reachable on TCP 8399
 as an AutoNAT + relay server.
 
 ## Background reading

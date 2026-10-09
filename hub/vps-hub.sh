@@ -7,12 +7,12 @@
 #   sudo PUBLIC_IP=203.0.113.7 LOGOSCTL_APPIMAGE=/path/logosctl-x86_64.AppImage LGX_DIR=/path/lgx hub/vps-hub.sh
 #
 # LGX_DIR holds the portable .lgx of delivery_module, ble_mesh, keycard, loam_core and swamp_core.
-# Optional: HUB_DIR (/var/lib/swamp-hub), STORAGE_PORT (8299), HUB_NAME ("Swamp hub").
+# Optional: HUB_DIR (/var/lib/swamp-hub), STORAGE_PORT (8399), HUB_NAME ("Swamp hub").
 # Re-running upgrades the packages and restarts the service; the hub's identity and data stay.
 set -euo pipefail
 : "${PUBLIC_IP:?set PUBLIC_IP}" "${LOGOSCTL_APPIMAGE:?set LOGOSCTL_APPIMAGE}" "${LGX_DIR:?set LGX_DIR}"
 HUB_DIR="${HUB_DIR:-/var/lib/swamp-hub}"
-STORAGE_PORT="${STORAGE_PORT:-8299}"
+STORAGE_PORT="${STORAGE_PORT:-8399}"
 HUB_NAME="${HUB_NAME:-Swamp hub}"
 BIN="$HUB_DIR/bin/logosctl"
 mkdir -p "$HUB_DIR/bin" "$HUB_DIR/home" "$HUB_DIR/lgx"
