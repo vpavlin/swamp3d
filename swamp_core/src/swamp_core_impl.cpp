@@ -29,9 +29,11 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.5";
+static const char* SWAMP_VERSION = "0.5.6";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
+static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
+static constexpr long long kCatchupFreshMs = 30000, kCatchupFreshForMs = 5 * 60 * 1000;   // the first minutes after coming up
 static constexpr long long kCatchupEveryMs = 120000; // each SDS frame ~19-25 KB, RLN budget (logos-rln-budget)
 static constexpr long long kTransferStaleMs = 10 * 60 * 1000;
 static constexpr long long kStallMs = 2 * 60 * 1000;          // a download that stops growing this long is cancelled
@@ -182,6 +184,7 @@ void SwampCoreImpl::setupDataDir() {
     const char* ix = getenv("SWAMP_INDEXER");
     m_indexer = m_hub || (ix && (std::string(ix) == "1" || std::string(ix) == "true"));
     if (const char* ev = getenv("SWAMP_INDEX_EVERY_MS")) m_indexEveryMs = std::max(1000LL, atoll(ev));
+    if (const char* ut = getenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS")) m_indexUploadTimeoutMs = std::max(1000LL, atoll(ut));
     if (const char* ie = getenv("SWAMP_INCLUSION_EVERY_MS")) m_inclusionEveryMs = std::max(1000LL, atoll(ie));
     if (const char* ig = getenv("SWAMP_INCLUSION_GRACE_MS")) m_inclusionGraceMs = std::max(0LL, atoll(ig));
     if (const char* oc = getenv("SWAMP_OMISSION_CONFIRM_MS")) m_omissionConfirmMs = std::max(0LL, atoll(oc));
@@ -515,14 +518,14 @@ void SwampCoreImpl::handleFrame(const std::string& topic, const json& f, bool li
 // Serve what a peer asked for in batches, within a budget: every node answering every request at
 // full speed would flood the topic (and spend the RLN allowance). Anything cut off is asked
 // for again in the peer's next catch-up round.
-void SwampCoreImpl::serveEvents(const std::string& topic, const std::vector<Event>& evs) {
+void SwampCoreImpl::serveEvents(const std::string& topic, const std::vector<Event>& evs, bool budgeted) {
     long long now = nowMs();
     if (now - m_serveWindow > kServeWindowMs) { m_serveWindow = now; m_servedInWindow = 0; }
     json batch = json::array();
     size_t bytes = 0;
     auto flush = [&] { if (!batch.empty()) sendFrame(topic, json{{"t", "evs"}, {"es", batch}}); batch = json::array(); bytes = 0; };
     for (const auto& e : evs) {
-        if (m_servedInWindow >= kServePerWindow) { m_throttled += 1; continue; }
+        if (budgeted && m_servedInWindow >= kServePerWindow) { m_throttled += 1; continue; }
         json j = logos_sync::eventToJson(e);
         size_t n = j.dump().size();
         if (bytes + n > kFrameBytes) flush();
@@ -539,6 +542,7 @@ void SwampCoreImpl::catchupOn(const std::string& topic) {
 }
 void SwampCoreImpl::catchupRound() {
     m_lastCatchup = nowMs();
+    m_rxEventsAtCatchup = m_rxEvents;
     for (const auto& t : subscribedTopics()) catchupOn(t);
 }
 
@@ -549,6 +553,7 @@ void SwampCoreImpl::onStatus(const std::string& s) {
     m_status = s;
     if (s == "Connected" && !m_ready) {
         m_ready = true;
+        m_readyAt = nowMs();
         for (const auto& t : subscribedTopics()) ensureJoined(t);
         for (int ms : {3000, 10000, 25000}) QTimer::singleShot(ms, m_timer, [this] { std::lock_guard<std::recursive_mutex> l(m_mtx); catchupRound(); });
     } else if (s == "Connected") {
@@ -976,20 +981,34 @@ static const OrcaBuild* orcaBuild() {
 json SwampCoreImpl::managedSlicer() const {
     std::string run = m_dataDir + "/slicers/orca-2.4.2/squashfs-root/AppRun";
     std::error_code ec;
-    if (!fs::exists(run, ec)) return nullptr;
+    // only once it has started here: an unpacked copy that can't run must not shadow a working slicer
+    if (!fs::exists(run, ec) || !fs::exists(m_dataDir + "/slicers/orca-2.4.2/works", ec)) return nullptr;
     return json{{"name", "OrcaSlicer 2.4.2 (set up by Swamp)"}, {"program", run}, {"args", json::array()}, {"managed", true}};
 }
 
 // The command that installs a system package on this distribution (from /etc/os-release).
-static std::string pkgInstall(const std::string& fedora, const std::string& debian, const std::string& arch, const std::string& suse) {
+struct OsRelease { std::string id, like, version; };
+static OsRelease osRelease() {
+    OsRelease o;
     std::ifstream f("/etc/os-release");
-    std::string line, id, like;
+    std::string line;
     while (std::getline(f, line)) {
         auto val = [&](const char* k) { std::string v = line.substr(strlen(k)); v.erase(std::remove(v.begin(), v.end(), '"'), v.end()); return v; };
-        if (line.rfind("ID=", 0) == 0) id = val("ID=");
-        if (line.rfind("ID_LIKE=", 0) == 0) like = val("ID_LIKE=");
+        if (line.rfind("ID=", 0) == 0) o.id = val("ID=");
+        if (line.rfind("ID_LIKE=", 0) == 0) o.like = val("ID_LIKE=");
+        if (line.rfind("VERSION_ID=", 0) == 0) o.version = val("VERSION_ID=");
     }
-    std::string all = " " + id + " " + like + " ";
+    return o;
+}
+// Debian 13+ and Ubuntu 24.04+ renamed some libraries for the 64-bit time_t transition (libfuse2 -> libfuse2t64)
+static bool debianT64() {
+    OsRelease o = osRelease();
+    double v = atof(o.version.c_str());
+    return (o.id == "debian" && v >= 13) || (o.id == "ubuntu" && v >= 24.04) || (o.id != "debian" && o.id != "ubuntu" && o.like.find("ubuntu") != std::string::npos);
+}
+static std::string pkgInstall(const std::string& fedora, const std::string& debian, const std::string& arch, const std::string& suse) {
+    OsRelease o = osRelease();
+    std::string all = " " + o.id + " " + o.like + " ";
     auto is = [&](const char* d) { return all.find(std::string(" ") + d + " ") != std::string::npos; };
     if (is("fedora") || is("rhel") || is("centos")) return "sudo dnf install -y " + fedora;
     if (is("debian") || is("ubuntu")) return "sudo apt install -y " + debian;
@@ -1023,6 +1042,14 @@ json SwampCoreImpl::slicerFix(const std::string& log, const json& slicer) const 
                          (b ? "Swamp can download OrcaSlicer 2.4.2 for you (about 140 MB, from OrcaSlicer's GitHub releases, checked against a pinned hash)." : "Install OrcaSlicer 2.4 or newer, or Bambu Studio, then restart Basecamp.")}};
         manual(); fx["steps"] = steps; return fx;
     }
+    if (log.find("version `GLIBC_") != std::string::npos || log.find("version `GLIBCXX_") != std::string::npos) {
+        // the AppImage is built against a newer C library than this system has (e.g. Debian 12, Ubuntu 22.04)
+        json fx{{"title", "This Linux is too old for that OrcaSlicer build"}, {"action", ""},
+                {"text", str(slicer, "name") + " needs a newer C library (glibc 2.38 or later) than this system has. The Flatpak brings its own and works here."}};
+        steps.push_back({{"text", "Install OrcaSlicer from Flathub (run in a terminal), then restart Basecamp:"}, {"command", "flatpak install -y flathub io.github.softfever.OrcaSlicer"}});
+        steps.push_back({{"text", "No Flatpak yet? Set it up first:"}, {"command", pkgInstall("flatpak", "flatpak", "flatpak", "flatpak") + (pkgInstall("x", "x", "x", "x").empty() ? "" : " && flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo")}});
+        fx["steps"] = steps; return fx;
+    }
     if (lacks("libwebkit2gtk-4.0")) {
         json fx{{"title", "This OrcaSlicer is built for older Linux"}, {"action", b ? "installSlicer" : ""},
                 {"text", "The " + str(slicer, "name") + " you have is the Ubuntu 22.04 build. It needs WebKitGTK 4.0, which current distributions no longer ship, so installing packages won't fix it. The Ubuntu 24.04 build of OrcaSlicer 2.4.2 works. Swamp can download it and use it from now on (about 140 MB, hash-checked); your other slicer stays as it is."}};
@@ -1038,7 +1065,7 @@ json SwampCoreImpl::slicerFix(const std::string& log, const json& slicer) const 
     if (lacks("libfuse") || log.find("dlopen(): error loading libfuse") != std::string::npos || log.find("AppImages require FUSE") != std::string::npos) {
         json fx{{"title", "This AppImage can't start without FUSE"}, {"action", b ? "installSlicer" : ""},
                 {"text", "AppImages need FUSE to run. Swamp can download OrcaSlicer 2.4.2 and unpack it, which needs no FUSE."}};
-        std::string cmd = pkgInstall("fuse-libs", "libfuse2t64", "fuse2", "libfuse2");
+        std::string cmd = pkgInstall("fuse-libs", debianT64() ? "libfuse2t64" : "libfuse2", "fuse2", "libfuse2");
         if (!cmd.empty()) steps.push_back({{"text", "Or install FUSE and keep your AppImage:"}, {"command", cmd}});
         fx["steps"] = steps; return fx;
     }
@@ -1049,6 +1076,17 @@ json SwampCoreImpl::slicerFix(const std::string& log, const json& slicer) const 
     }
     if (!missing.empty()) {
         std::string name = missing.substr(1);
+        // libraries Orca needs that aren't always installed: the package to install, per distribution
+        struct Lib { const char* so; const char* fedora; const char* debian; const char* arch; const char* suse; };
+        static const Lib libs[] = {{"libGLU.so", "mesa-libGLU", "libglu1-mesa", "glu", "libGLU1"},
+                                   {"libmspack.so", "libmspack", "libmspack0", "libmspack", "libmspack0"},
+                                   {"libOSMesa.so", "mesa-libOSMesa", "libosmesa6", "mesa", "Mesa-libOSMesa"}};
+        for (const auto& l : libs) if (name.find(l.so) != std::string::npos) {
+            std::string cmd = pkgInstall(l.fedora, l.debian, l.arch, l.suse);
+            steps.push_back({{"text", cmd.empty() ? std::string("Install the package that provides ") + l.so + ", then try again." : "Run this in a terminal (it asks for your password), then try again:"}, {"command", cmd}});
+            return json{{"title", "The slicer needs one system library"}, {"action", ""}, {"steps", steps},
+                        {"text", str(slicer, "name") + " needs " + name + ", which isn't installed."}};
+        }
         json fx{{"title", "The slicer is missing a system library"}, {"action", b && !managed ? "installSlicer" : ""},
                 {"text", str(slicer, "name") + " needs " + name + ", which isn't on this system." + (b && !managed ? " Swamp can download the OrcaSlicer build it's tested with instead." : " Install the package that provides it, then try again.")}};
         manual(); fx["steps"] = steps; return fx;
@@ -1082,10 +1120,14 @@ std::string SwampCoreImpl::installSlicer() {
         std::error_code ec;
         fs::create_directories(dir, ec);
         std::string have;
-        if (!(fs::exists(img, ec) && sha256File(img, have) && have == sha)) {
+        // already unpacked (an earlier Swamp set it up, before it checked that it starts): just check it again
+        bool unpacked = fs::exists(out + "/squashfs-root/AppRun", ec);
+        if (!unpacked && !(fs::exists(img, ec) && sha256File(img, have) && have == sha)) {
             QString tool = QStandardPaths::findExecutable("curl");
-            QStringList args{"-fL", "--retry", "3", "-o", QString::fromStdString(part), QString::fromStdString(url)};
-            if (tool.isEmpty()) { tool = QStandardPaths::findExecutable("wget"); args = QStringList{"-O", QString::fromStdString(part), QString::fromStdString(url)}; }
+            // no stalling forever: give up on a connection that doesn't start or a transfer that stops
+            QStringList args{"-fL", "--retry", "3", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "120", "--max-time", "3600",
+                             "-o", QString::fromStdString(part), QString::fromStdString(url)};
+            if (tool.isEmpty()) { tool = QStandardPaths::findExecutable("wget"); args = QStringList{"--timeout=60", "--tries=3", "-O", QString::fromStdString(part), QString::fromStdString(url)}; }
             if (tool.isEmpty()) return json{{"ok", false}, {"error", "Swamp needs curl or wget to download OrcaSlicer."}};
             fs::remove(part, ec);
             QProcess p; p.start(tool, args);
@@ -1101,6 +1143,7 @@ std::string SwampCoreImpl::installSlicer() {
             fs::rename(part, img, ec);
             if (ec) return json{{"ok", false}, {"error", "Couldn't save the download: " + ec.message()}};
         }
+        if (!unpacked) {
         setStage("unpacking", "Unpacking OrcaSlicer...");
         fs::permissions(img, fs::perms::owner_exec, fs::perm_options::add, ec);
         fs::remove_all(out, ec);
@@ -1110,19 +1153,27 @@ std::string SwampCoreImpl::installSlicer() {
         x.waitForFinished(10 * 60 * 1000);
         if (!fs::exists(out + "/squashfs-root/AppRun", ec)) return json{{"ok", false}, {"error", "Couldn't unpack the AppImage: " + QString(x.readAllStandardError()).trimmed().right(200).toStdString()}};
         fs::remove(img, ec);   // the unpacked copy is what runs
+        }
         setStage("checking", "Checking that it starts...");
         QProcess t; t.start(QString::fromStdString(out + "/squashfs-root/AppRun"), {"--help"});
-        t.waitForFinished(120000);
+        bool fin = t.waitForFinished(120000);
         std::string log = QString(t.readAllStandardOutput() + t.readAllStandardError()).toStdString();
-        return json{{"ok", true}, {"log", log.substr(log.size() > 4000 ? log.size() - 4000 : 0)}};
+        // it works if it printed its usage; a loader error or a crash leaves no usage text
+        bool works = fin && t.exitStatus() == QProcess::NormalExit && log.find("Usage: orca-slicer") != std::string::npos;
+        fs::remove(out + "/works", ec);
+        if (works) { std::ofstream(out + "/works") << "ok\n"; }
+        return json{{"ok", true}, {"works", works}, {"log", log.substr(log.size() > 4000 ? log.size() - 4000 : 0)}};
     }, [this](json r) {
         m_slicerAt = 0;   // rescan: the new one goes first
         if (!r.value("ok", false)) {
             m_slicerInstall = json{{"stage", "failed"}, {"message", r.value("error", "Setting up OrcaSlicer failed")}};
         } else {
-            json fix = slicerFix(r.value("log", ""), managedSlicer());
-            if (fix.is_object()) m_slicerInstall = json{{"stage", "failed"}, {"message", "OrcaSlicer 2.4.2 is set up, but it can't start yet."}, {"fix", fix}};
-            else m_slicerInstall = json{{"stage", "done"}, {"message", "OrcaSlicer 2.4.2 is set up. Printing uses it from now on."}};
+            json fix = slicerFix(r.value("log", ""), json{{"name", "OrcaSlicer 2.4.2"}, {"managed", true}});
+            if (r.value("works", false)) m_slicerInstall = json{{"stage", "done"}, {"message", "OrcaSlicer 2.4.2 is set up. Swamp uses it from now on."}};
+            else m_slicerInstall = json{{"stage", "failed"}, {"message", "OrcaSlicer 2.4.2 is downloaded, but it doesn't start on this system."}, {"log", r.value("log", "")},
+                                        {"fix", fix.is_object() ? fix : json{{"title", "OrcaSlicer doesn't start here"}, {"action", ""},
+                                                {"text", "Copy its output below to see why, or install OrcaSlicer another way (the Flatpak works on most systems)."},
+                                                {"steps", json::array({json{{"text", "Install OrcaSlicer from Flathub (run in a terminal), then restart Basecamp:"}, {"command", "flatpak install -y flathub io.github.softfever.OrcaSlicer"}}})}}}};
         }
         publishState();
     });
@@ -1307,7 +1358,15 @@ void SwampCoreImpl::tick() {
         flushAnnouncements();
         indexTick();
         checkInclusion();
-        if (m_ready && now - m_lastCatchup > kCatchupEveryMs) catchupRound();
+        // Peers serve a few hundred events a minute each, so a node that's behind (just installed, or
+        // offline for a while) gets part of what it's missing per round. While rounds still bring
+        // events in, ask again soon; once caught up, every two minutes. (Review 2026-10-09: a late
+        // indexer missed a whole category for minutes.)
+        // A node that just came up may get nothing from a round (every peer's budget spent): keep
+        // asking at a moderate pace for its first minutes as well.
+        long long every = m_rxEvents > m_rxEventsAtCatchup ? kCatchupBehindMs
+                        : (m_readyAt && now - m_readyAt < kCatchupFreshForMs) ? kCatchupFreshMs : kCatchupEveryMs;
+        if (m_ready && now - m_lastCatchup > every) catchupRound();
     } catch (const std::exception& e) {
         fprintf(stderr, "[swamp] tick: %s\n", e.what());
     }
@@ -1404,7 +1463,8 @@ std::string SwampCoreImpl::listModels(std::string queryJson) {
     return ok(json{{"models", out}, {"total", hits.size()}, {"tags", tagList}});
 }
 
-// Share links: swamp://model/<modelId>?c=<category>. The id opens the model through the search
+// Share links: swamp://model/<modelId>?c=<category>. The first link in the pasted text counts; the
+// Share button puts the link first, before the creator-chosen title. The id opens the model through the search
 // index (its record shard), like a search result. The category lets this node listen on that topic
 // for the session, so the model's new versions, comments and makes arrive live. (Catch-up on a
 // topic needs the whole topic's set, which only followers hold.) Following a category stays the
@@ -1423,7 +1483,12 @@ std::string SwampCoreImpl::openLink(std::string link) {
     std::string cat;
     size_t q = rest.find("c=");
     if (q != std::string::npos && (rest[q - 1] == '?' || rest[q - 1] == '&')) cat = rest.substr(q + 2, rest.find_first_of("&# ", q) - q - 2);
-    m_linked.insert(id);
+    // models from links are accepted on topics we don't follow - keep that set small
+    if (!m_linked.count(id)) {
+        m_linkedOrder.push_back(id);
+        m_linked.insert(id);
+        while (m_linkedOrder.size() > 256) { m_linked.erase(m_linkedOrder.front()); m_linkedOrder.pop_front(); }
+    }
     if (knownCategory(cat) && !m_subs.count(cat)) ensureJoined(categoryTopic(cat));
     return json{{"ok", true}, {"modelId", id}, {"category", knownCategory(cat) ? cat : ""}}.dump();
 }
@@ -1553,11 +1618,19 @@ void SwampCoreImpl::indexTick() {
     long long now = nowMs();
     if (!m_indexer || !m_ready) return;
     if (!m_indexPending.is_null()) {
+        // A shard upload that never finishes must not stop this indexer for good: its last index would
+        // stay the live one, however stale (found 2026-10-09: an indexer kept serving an index from
+        // before it had caught up). Give up on it after a while and build a fresh one.
+        if (now - num(m_indexPending, "startedAt") > m_indexUploadTimeoutMs) {
+            fprintf(stderr, "[swamp] index: shard uploads didn't finish in %lld s; building a new index\n", m_indexUploadTimeoutMs / 1000);
+            m_indexPending = nullptr; m_indexRoot.clear(); m_lastIndex = 0;
+            return;
+        }
         json shards = json::object();
         for (auto it = m_indexPending["shards"].begin(); it != m_indexPending["shards"].end(); ++it) {
             std::string sha = str(it.value(), "sha256");
             auto c = m_myCids.find(sha);
-            if (c == m_myCids.end()) return;   // still uploading
+            if (c == m_myCids.end()) { uploadBlob(sha); return; }   // still uploading (uploadBlob retries one that was dropped)
             shards[it.key()] = {{"sha256", sha}, {"size", num(it.value(), "size")}, {"cid", c->second}};
         }
         json mf{{"v", index::VERSION}, {"epoch", num(m_indexPending, "epoch")}, {"root", str(m_indexPending, "root")},
@@ -1589,7 +1662,7 @@ void SwampCoreImpl::indexTick() {
     std::set<std::string> leaveOut = excluded;
     leaveOut.insert(omit.begin(), omit.end());
     auto shards = index::build(m_cat, content, leaveOut);
-    json pend{{"epoch", now / 1000}, {"root", root}, {"models", 0}, {"shards", json::object()}, {"excluded", excl}};
+    json pend{{"epoch", now / 1000}, {"root", root}, {"models", 0}, {"shards", json::object()}, {"excluded", excl}, {"startedAt", now}};
     int models = 0;
     for (const auto& [id, m] : m_cat.models) models += !m.versions.empty() && !m.retracted;
     pend["models"] = models;
@@ -1622,7 +1695,7 @@ json SwampCoreImpl::bestManifest() {
         std::string key = str(mf, "root") + "|" + (mf.contains("shards") ? mf["shards"].dump() : "");
         Group& g = groups[key];
         g.indexers++;
-        if (m_omissions.count(who)) g.caught++;
+        if (caughtOmitting(who)) g.caught++;
         if (g.newest.is_null() || at > num(g.newest, "published")) g.newest = mf;
     }
     const Group* best = nullptr;
@@ -1641,6 +1714,12 @@ json SwampCoreImpl::bestManifest() {
 // my models published well before that index is in it - in the term shard of its first title
 // word - or declared excluded. A missing one is evidence: the indexer signed a manifest naming a
 // shard (by hash) that leaves my model out. Clients stop preferring that indexer.
+// Caught leaving out at least one of my models, in its latest index. (Omissions are per indexer and
+// model, and withdrawn when a newer index includes the model.)
+bool SwampCoreImpl::caughtOmitting(const std::string& who) const {
+    auto it = m_omissions.lower_bound(who + "|");
+    return it != m_omissions.end() && it->first.rfind(who + "|", 0) == 0;
+}
 void SwampCoreImpl::checkInclusion() {
     long long now = nowMs();
     if (now - m_lastInclusion < m_inclusionEveryMs) return;
@@ -1677,8 +1756,13 @@ void SwampCoreImpl::checkInclusion() {
             }
             if (pending) { m_lastInclusion = now - m_inclusionEveryMs + 5000; continue; }   // fetching: look again soon
             std::string skey = who + "|" + id;
-            if (there) { m_suspects.erase(skey); continue; }
-            if (m_omissions.count(who)) continue;
+            if (there) {
+                m_suspects.erase(skey);
+                // a newer index includes it after all (the indexer was catching up): withdraw the accusation
+                if (m_omissions.erase(skey)) { fprintf(stderr, "[swamp] index %s now includes my model %s: omission withdrawn\n", who.substr(0, 10).c_str(), id.substr(0, 8).c_str()); publishState(); }
+                continue;
+            }
+            if (m_omissions.count(skey)) continue;
             // Missing could just mean the indexer never received it (it was offline, or we were).
             // First time: a suspect - re-send the model's events so it can. Caught only if an
             // index built well after that re-send still leaves it out (ADR 0016).
@@ -1687,14 +1771,16 @@ void SwampCoreImpl::checkInclusion() {
                 m_suspects[skey] = json{{"indexer", who}, {"indexerName", nameOf(who)}, {"modelId", id}, {"title", m.versions.back().value("title", "")}, {"since", now}};
                 std::vector<Event> mine;
                 for (const auto& e : m_log) if (index::modelOfEvent(e, m_cat) == id) mine.push_back(e);
-                serveEvents(categoryTopic(m.category), mine);
+                // outside the serving budget: one model's events, once per suspect (a busy node would
+                // otherwise drop exactly the re-send that clears the indexer)
+                serveEvents(categoryTopic(m.category), mine, false);
                 fprintf(stderr, "[swamp] index %s lacks my model %s: re-sent its %zu events\n", who.substr(0, 10).c_str(), id.substr(0, 8).c_str(), mine.size());
                 publishState();
                 continue;
             }
             if (num(mf, "epoch") * 1000 < num(sp->second, "since") + m_omissionConfirmMs) continue;   // no index built since then yet
             std::string sha = mf.contains("shards") && mf["shards"].contains(key) ? str(mf["shards"][key], "sha256") : "";
-            m_omissions[who] = json{{"indexer", who}, {"indexerName", nameOf(who)}, {"manifestEvent", str(mf, "eventId")},
+            m_omissions[skey] = json{{"indexer", who}, {"indexerName", nameOf(who)}, {"manifestEvent", str(mf, "eventId")},
                                     {"epoch", num(mf, "epoch")}, {"modelId", id}, {"title", m.versions.back().value("title", "")},
                                     {"shard", key}, {"shardSha256", sha}, {"shardMissing", sha.empty()}, {"modelCreated", m.created},
                                     {"resentAt", num(sp->second, "since")}, {"seen", now}};

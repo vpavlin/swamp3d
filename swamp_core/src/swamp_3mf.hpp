@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <string>
@@ -44,7 +45,15 @@ inline bool parseMat(const QString& s, Mat& m) {
 }
 
 // ---- zip ------------------------------------------------------------------------------------------
-static constexpr size_t kMaxEntry = 512u << 20;   // an uncompressed model part over 512 MB is refused
+// Limits: 3MF files come from strangers (review 2026-10-09: a 513-byte file hung the reader, a 16 KB
+// one wrote 572 MB, a 1.8 MB one used 1.2 GB). Generous for real printable models, which are a few
+// million triangles at most.
+static constexpr size_t kMaxEntry = 128u << 20;       // one uncompressed model part
+static constexpr size_t kMaxUnpacked = 256u << 20;    // all model parts together
+static constexpr size_t kMaxParsed = 10'000'000;      // vertices + triangles read, all parts together
+static constexpr size_t kMaxVisits = 100'000;         // objects visited while expanding components, all items
+static constexpr size_t kMaxTriangles = 5'000'000;    // triangles written, all items together (~250 MB of STL)
+static constexpr size_t kMaxItems = 1000;             // printable build items
 
 inline uint32_t rd32(const unsigned char* p) { return p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24; }
 inline uint16_t rd16(const unsigned char* p) { return uint16_t(p[0] | p[1] << 8); }
@@ -53,6 +62,8 @@ inline uint16_t rd16(const unsigned char* p) { return uint16_t(p[0] | p[1] << 8)
 inline bool readModels(const std::string& path, std::map<std::string, std::string>& out, std::string& err) {
     std::ifstream f(path, std::ios::binary);
     if (!f) { err = "can't open the file"; return false; }
+    std::error_code fec;
+    if (std::filesystem::file_size(path, fec) > (512u << 20) || fec) { err = "the file is too large"; return false; }
     std::string z((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     const auto* d = reinterpret_cast<const unsigned char*>(z.data());
     size_t n = z.size(), eocd = std::string::npos;
@@ -61,6 +72,7 @@ inline bool readModels(const std::string& path, std::map<std::string, std::strin
         if (i == 0) break;
     }
     if (eocd == std::string::npos) { err = "not a zip archive"; return false; }
+    size_t total = 0;
     size_t count = rd16(d + eocd + 10), cd = rd32(d + eocd + 16);
     for (size_t k = 0, p = cd; k < count; k++) {
         if (p + 46 > n || rd32(d + p) != 0x02014b50) { err = "damaged zip directory"; return false; }
@@ -72,22 +84,30 @@ inline bool readModels(const std::string& path, std::map<std::string, std::strin
         std::string lower = name;
         for (auto& c : lower) c = char(tolower(static_cast<unsigned char>(c)));
         if (lower.rfind("3d/", 0) != 0 || lower.size() < 6 || lower.compare(lower.size() - 6, 6, ".model") != 0) continue;
-        if (usize > kMaxEntry || csize == 0xffffffff) { err = name + " is too large"; return false; }
+        if (usize > kMaxEntry || csize == 0xffffffff || total + usize > kMaxUnpacked) { err = "the model is too large to unpack (" + name + ")"; return false; }
+        total += usize;
         if (lho + 30 > n || rd32(d + lho) != 0x04034b50) { err = "damaged zip entry " + name; return false; }
         size_t data = lho + 30 + rd16(d + lho + 26) + rd16(d + lho + 28);
         if (data + csize > n) { err = "truncated zip entry " + name; return false; }
         std::string bytes;
         if (method == 0) bytes.assign(z, data, csize);
         else if (method == 8) {
-            bytes.resize(usize);
+            // inflate in steps: memory grows with what's really there, not with the size the zip claims
             z_stream s{};
             if (inflateInit2(&s, -MAX_WBITS) != Z_OK) { err = "zlib"; return false; }
             s.next_in = const_cast<Bytef*>(d + data); s.avail_in = uInt(csize);
-            s.next_out = reinterpret_cast<Bytef*>(bytes.data()); s.avail_out = uInt(usize);
-            int rc = inflate(&s, Z_FINISH);
-            size_t got = s.total_out;
+            int rc = Z_OK;
+            char buf[1 << 16];
+            while (rc == Z_OK) {
+                s.next_out = reinterpret_cast<Bytef*>(buf); s.avail_out = sizeof buf;
+                rc = inflate(&s, Z_NO_FLUSH);
+                if (rc != Z_OK && rc != Z_STREAM_END) break;
+                bytes.append(buf, sizeof buf - s.avail_out);
+                if (bytes.size() > usize) { rc = Z_DATA_ERROR; break; }   // more than declared: refuse
+                if (rc == Z_OK && s.avail_in == 0 && s.avail_out != 0) { rc = Z_DATA_ERROR; break; }   // truncated
+            }
             inflateEnd(&s);
-            if (rc != Z_STREAM_END || got != usize) { err = "can't unpack " + name; return false; }
+            if (rc != Z_STREAM_END || bytes.size() != usize) { err = "can't unpack " + name; return false; }
         } else { err = name + " uses an unsupported zip compression"; return false; }
         out["/" + name] = std::move(bytes);
     }
@@ -101,7 +121,7 @@ struct Object { std::vector<std::array<double, 3>> v; std::vector<std::array<uin
 struct Item { int id = 0; Mat m = identity(); bool printable = true; };
 using Objects = std::map<std::pair<std::string, int>, Object>;   // (model file, object id)
 
-inline bool parseModel(const std::string& file, const std::string& xml, Objects& objs, std::vector<Item>* build, std::string& err) {
+inline bool parseModel(const std::string& file, const std::string& xml, Objects& objs, std::vector<Item>* build, size_t& parsed, std::string& err) {
     QXmlStreamReader r(QByteArray::fromRawData(xml.data(), int(xml.size())));
     Object* cur = nullptr;
     double mm = 1;   // the file's unit in millimetres (<model unit="...">; the default is millimetre)
@@ -122,11 +142,15 @@ inline bool parseModel(const std::string& file, const std::string& xml, Objects&
         else if (n == u"object") { cur = &objs[{file, a.value("id").toInt()}]; }
         else if (n == u"vertex" && cur) {
             bool ox, oy, oz;
-            cur->v.push_back({a.value("x").toDouble(&ox) * mm, a.value("y").toDouble(&oy) * mm, a.value("z").toDouble(&oz) * mm});
-            if (!ox || !oy || !oz) { err = "a bad vertex in " + file; return false; }
+            if (++parsed > kMaxParsed) { err = "the model has too many vertices and triangles"; return false; }
+            std::array<double, 3> v{a.value("x").toDouble(&ox) * mm, a.value("y").toDouble(&oy) * mm, a.value("z").toDouble(&oz) * mm};
+            if (!ox || !oy || !oz || !std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2]) ||
+                std::fabs(v[0]) > 1e6 || std::fabs(v[1]) > 1e6 || std::fabs(v[2]) > 1e6) { err = "a bad vertex in " + file; return false; }
+            cur->v.push_back(v);
         }
         else if (n == u"triangle" && cur) {
             bool o1, o2, o3;
+            if (++parsed > kMaxParsed) { err = "the model has too many vertices and triangles"; return false; }
             cur->t.push_back({a.value("v1").toUInt(&o1), a.value("v2").toUInt(&o2), a.value("v3").toUInt(&o3)});
             if (!o1 || !o2 || !o3) { err = "a bad triangle in " + file; return false; }
         }
@@ -141,6 +165,7 @@ inline bool parseModel(const std::string& file, const std::string& xml, Objects&
             cur->parts.push_back(c);
         }
         else if (n == u"item" && build) {
+            if (build->size() >= kMaxItems) { err = "the project has too many items on its build plate"; return false; }
             Item it;
             it.id = a.value("objectid").toInt();
             it.printable = a.value("printable") != u"0";
@@ -153,8 +178,18 @@ inline bool parseModel(const std::string& file, const std::string& xml, Objects&
     return true;
 }
 
+inline bool toStlsImpl(const std::string& path, const std::string& outDir, std::vector<std::string>& stls, std::string& err);
 // Every printable build item as one binary STL in outDir (item-1.stl, ...). Returns the paths.
+// On failure nothing is left behind (no partial output from the items before the one that failed).
 inline bool toStls(const std::string& path, const std::string& outDir, std::vector<std::string>& stls, std::string& err) {
+    size_t before = stls.size();
+    if (toStlsImpl(path, outDir, stls, err)) return true;
+    std::error_code ec;
+    for (size_t i = before; i < stls.size(); i++) std::filesystem::remove(stls[i], ec);
+    stls.resize(before);
+    return false;
+}
+inline bool toStlsImpl(const std::string& path, const std::string& outDir, std::vector<std::string>& stls, std::string& err) {
     std::map<std::string, std::string> files;
     if (!readModels(path, files, err)) return false;
     std::string root = "/3D/3dmodel.model";
@@ -164,19 +199,26 @@ inline bool toStls(const std::string& path, const std::string& outDir, std::vect
     }
     Objects objs;
     std::vector<Item> build;
-    for (const auto& [name, xml] : files) if (!parseModel(name, xml, objs, name == root ? &build : nullptr, err)) return false;
+    size_t parsed = 0;
+    for (auto& [name, xml] : files) {
+        if (!parseModel(name, xml, objs, name == root ? &build : nullptr, parsed, err)) return false;
+        std::string().swap(xml);   // the XML isn't needed once parsed
+    }
     if (build.empty()) { err = "the project has nothing on its build plate"; return false; }
     int index = 0;
+    // budgets for the whole file, not per item: a component tree (or many items reusing one object)
+    // can otherwise multiply a small file into hours of work or gigabytes of output
+    size_t visits = 0, triangles = 0;
     for (const auto& item : build) {
         if (!item.printable) continue;
         std::vector<float> tris;   // 9 floats per triangle
-        size_t budget = 20'000'000;   // triangles; also stops a component cycle
         std::function<bool(const std::string&, int, const Mat&, int)> addShape = [&](const std::string& file, int id, const Mat& m, int depth) {
+            if (++visits > kMaxVisits) { err = "the model's parts nest or repeat too much"; return false; }
             auto it = objs.find({file, id});
             if (it == objs.end() || depth > 16) { err = "a missing or looping object in the project"; return false; }
             const Object& o = it->second;
             for (const auto& tr : o.t) {
-                if (!budget--) { err = "the model is too large"; return false; }
+                if (++triangles > kMaxTriangles) { err = "the model is too large (over 5 million triangles)"; return false; }
                 for (uint32_t vi : tr) {
                     if (vi >= o.v.size()) { err = "a triangle points past the vertex list"; return false; }
                     const auto& p = o.v[vi];

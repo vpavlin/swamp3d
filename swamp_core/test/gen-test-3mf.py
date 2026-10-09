@@ -52,3 +52,33 @@ with zipfile.ZipFile(out2, "w", zipfile.ZIP_DEFLATED) as z:
     info = zipfile.ZipInfo("3D/3dmodel.model", (2026, 1, 1, 0, 0, 0)); info.compress_type = zipfile.ZIP_DEFLATED
     z.writestr(info, inch)
 print(out2)
+
+# hostile files (review 2026-10-09), written to a scratch dir, not committed:  gen-test-3mf.py --hostile DIR
+import sys, struct
+if len(sys.argv) == 3 and sys.argv[1] == "--hostile":
+    d = sys.argv[2]; os.makedirs(d, exist_ok=True)
+    H = '<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>'
+    def mdl(objs, items): return H + objs + '</resources><build>' + items + '</build></model>'
+    def strip(oid, n):
+        return ('<object id="%d" type="model"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="0" y="10" z="0"/></vertices><triangles>' % oid
+                + '<triangle v1="0" v2="1" v3="2"/>' * n + '</triangles></mesh></object>')
+    def put(name, parts):
+        with zipfile.ZipFile(os.path.join(d, name), "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            for n, x in parts.items(): z.writestr(n, x)
+    # component bomb: 16 levels x 8 components each, empty leaf (8^16 visits, no triangles)
+    objs = "".join('<object id="%d" type="model"><components>' % i + '<component objectid="%d"/>' % (i + 1) * 8 + '</components></object>' for i in range(1, 17))
+    put("component-bomb.3mf", {"3D/3dmodel.model": mdl(objs + '<object id="17" type="model"><mesh><vertices/><triangles/></mesh></object>', '<item objectid="1"/>')})
+    # instancing: one 200k-triangle object on 60 build items (12M triangles out)
+    put("instancing.3mf", {"3D/3dmodel.model": mdl(strip(1, 200000), '<item objectid="1"/>' * 60)})
+    # many big parts: 12 parts of 2M triangles each (~66 MB of XML apiece)
+    big = mdl(strip(1, 2000000), "")
+    parts = {"3D/3dmodel.model": mdl(strip(1, 12), '<item objectid="1"/>')}
+    for k in range(12): parts["3D/Objects/big%d.model" % k] = big
+    put("many-big-parts.3mf", parts)
+    # NaN / infinite coordinates
+    put("nan-inf.3mf", {"3D/3dmodel.model": mdl('<object id="1" type="model"><mesh><vertices><vertex x="nan" y="0" z="0"/><vertex x="inf" y="0" z="0"/><vertex x="0" y="1e300" z="0"/></vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>', '<item objectid="1"/>')})
+    # a zip directory that claims 500 MB for a tiny entry
+    put("ok-small.3mf", {"3D/3dmodel.model": mdl(strip(1, 12), '<item objectid="1"/>')})
+    b = open(os.path.join(d, "ok-small.3mf"), "rb").read(); i = b.find(b"PK\x01\x02") + 24
+    open(os.path.join(d, "lying-size.3mf"), "wb").write(b[:i] + struct.pack("<I", 500 << 20) + b[i + 4:])
+    print(d)

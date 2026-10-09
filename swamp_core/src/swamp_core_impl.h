@@ -18,6 +18,7 @@
 #include <functional>
 #include <memory>
 #include <atomic>
+#include <deque>
 #include "logos_module_context.h"
 #include "swamp_catalog.hpp"
 #include "swamp_bambu.hpp"
@@ -105,7 +106,7 @@ private:
     void sendFrame(const std::string& topic, const swamp::json& frame);
     void onFrame(const std::string& topic, const std::string& payloadB64, int64_t sentAt);
     void handleFrame(const std::string& topic, const swamp::json& f, bool live);
-    void serveEvents(const std::string& topic, const std::vector<swamp::Event>& evs);
+    void serveEvents(const std::string& topic, const std::vector<swamp::Event>& evs, bool budgeted = true);
     void catchupRound();
     void catchupOn(const std::string& topic);
     std::vector<std::string> subscribedTopics() const;
@@ -197,7 +198,8 @@ private:
     std::map<std::string, DownloadJob> m_jobs;
     std::map<std::string, std::string> m_myCids, m_toAnnounce;
     std::set<std::string> m_subs, m_joined;
-    std::set<std::string> m_linked;   // models opened from a share link this session
+    std::set<std::string> m_linked;   // models opened from a share link this session (at most 256)
+    std::deque<std::string> m_linkedOrder;
     std::map<std::string, long long> m_wantImg, m_extraImg, m_recordAt;
     std::map<std::string, std::vector<std::string>> m_extraCids;
     std::set<std::string> m_privateFetch, m_indexShas, m_openAfter;
@@ -205,9 +207,10 @@ private:
     swamp::json m_indexPending;
     std::string m_indexRoot, m_testOmit;
     bool m_indexer = false, m_privateShards = false;
-    long long m_lastIndex = 0, m_indexEveryMs = 30LL * 60 * 1000;
+    long long m_lastIndex = 0, m_indexEveryMs = 30LL * 60 * 1000, m_indexUploadTimeoutMs = 10LL * 60 * 1000;
     long long m_lastInclusion = 0, m_inclusionEveryMs = 5LL * 60 * 1000, m_inclusionGraceMs = 10LL * 60 * 1000;
-    std::map<std::string, swamp::json> m_omissions, m_suspects;
+    std::map<std::string, swamp::json> m_omissions, m_suspects;   // keyed "<indexer>|<modelId>"
+    bool caughtOmitting(const std::string& who) const;
     long long m_omissionConfirmMs = 10LL * 60 * 1000;
     std::map<std::string, std::string> m_excludedMine;
     long m_indexesBuilt = 0, m_privacyDowngrades = 0, m_slicerLaunches = 0, m_badShards = 0;
@@ -219,5 +222,7 @@ private:
     long long m_storageBusySince = 0;
     long long m_lastCatchup = 0, m_lastSave = 0, m_serveWindow = 0, m_lastStatusPoll = 0, m_lastManifestPoll = 0, m_announceHeldSince = 0;
     int m_servedInWindow = 0;
+    long m_rxEventsAtCatchup = 0;
+    long long m_readyAt = 0;
     long m_rx = 0, m_tx = 0, m_rxEvents = 0, m_rxBad = 0, m_uploaded = 0, m_fetched = 0, m_verifyFailed = 0, m_tooBig = 0, m_servedEvents = 0, m_throttled = 0, m_staleCatchup = 0, m_stalled = 0;
 };

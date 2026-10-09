@@ -61,6 +61,18 @@ and without deleting anything.
 - **Live tests:** `hub/two-node.sh` and `hub/search-live.sh`, with `LOGOSCTL` and `LGX_DIR` set
   (see the script headers).
 
+## Running a hub
+
+A hub is the same core, headless, with every category followed: it keeps a copy of every model's
+files, answers catch-up for people who were offline, and builds the search index. Without one, a
+model is only visible while someone who holds it is online. Anyone can run one on a server with a
+public IP:
+
+    sudo PUBLIC_IP=<ip> LOGOSCTL_APPIMAGE=logosctl-x86_64.AppImage LGX_DIR=<dir with the .lgx> hub/vps-hub.sh
+
+It runs as `swamp-hub.service` (logosctl 0.3.1, `SWAMP_HUB=1`), with Storage reachable on TCP 8299
+as an AutoNAT + relay server.
+
 ## Background reading
 
 Start with `notes/01`–`05a`, `RESEARCH.md` and `docs/THEFT.md`. The decisions live in `docs/adr/`,

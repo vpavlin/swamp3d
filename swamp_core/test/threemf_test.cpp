@@ -1,7 +1,9 @@
 // swamp_3mf.hpp: geometry out of Bambu-style 3MF projects (components, transforms, deflate).
 //   threemf_test <meshes dir> [extra.3mf ...]   (extra files: only checked to convert at all)
 #include "swamp_3mf.hpp"
+#include <chrono>
 #include <filesystem>
+#include <sys/resource.h>
 #include <iostream>
 namespace fs = std::filesystem;
 static int passes = 0, fails = 0;
@@ -49,6 +51,20 @@ int main(int argc, char** argv) {
         bool k = swamp3mf::toStls(argv[i], sub.string(), out, e);
         uint32_t tri = 0; for (const auto& s : out) tri += readStl(s).n;
         CHECK(k && tri > 0, argv[i] << " converts (" << out.size() << " items, " << tri << " triangles) " << e);
+    }
+    // hostile files (review 2026-10-09): each must be refused quickly, without huge memory or output
+    if (const char* hd = getenv("SWAMP_TEST_HOSTILE_3MF")) {
+        for (const char* name : {"component-bomb.3mf", "instancing.3mf", "many-big-parts.3mf", "nan-inf.3mf", "lying-size.3mf"}) {
+            fs::path sub = tmp / (std::string("h-") + name); fs::create_directories(sub);
+            std::vector<std::string> out; std::string e;
+            auto t0 = std::chrono::steady_clock::now();
+            bool k = swamp3mf::toStls(std::string(hd) + "/" + name, sub.string(), out, e);
+            double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            uintmax_t written = 0; for (const auto& o : out) written += fs::file_size(o);
+            CHECK(!k && secs < 15 && written == 0, name << " is refused in " << secs << " s (" << e << ")");
+        }
+        struct rusage ru; getrusage(RUSAGE_SELF, &ru);
+        CHECK(ru.ru_maxrss < 700 * 1024, "...and memory stays bounded (peak " << ru.ru_maxrss / 1024 << " MB)");
     }
     // refusals
     std::ofstream(tmp / "junk.3mf") << "not a zip";

@@ -47,6 +47,7 @@ int main(int argc, char** argv) {
     fs::remove_all(root);
     setenv("SWAMP_TICK_MS", "60", 1);
     setenv("SWAMP_INDEX_EVERY_MS", "1000", 1);   // the hub indexes every second here
+    setenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS", "8000", 1);   // ...and gives up on a stuck shard upload after 8 s
     setenv("SWAMP_INCLUSION_EVERY_MS", "1000", 1);   // creators audit indexers every second
     setenv("SWAMP_INCLUSION_GRACE_MS", "0", 1);
     setenv("SWAMP_OMISSION_CONFIRM_MS", "1500", 1);
@@ -405,6 +406,10 @@ int main(int argc, char** argv) {
             bool policyNotBlamed = true;
             for (const auto& o : json(alice->snap()["index"]["omissions"])) if (o["indexer"] == policy->snap()["me"]["address"]) policyNotBlamed = false;
             CHECK(policyNotBlamed, "the policy hub's declared exclusion is not counted as an omission");
+            // the rogue only drops the toy: anything else it was late to include isn't held against it
+            CHECK(waitFor([&] {
+                for (const auto& o : json(alice->snap()["index"]["omissions"])) if (o["indexer"] == rogueAddr && o["modelId"] != toyId) return false;
+                return true; }, 40000), "no lasting accusation for a model the indexer includes once it has caught up (" + json(alice->snap()["index"]["omissions"]).dump() + ")");
             CHECK(waitFor([&] {
                 for (const auto& x : json(alice->snap()["index"]["excludedMine"])) if (x["modelId"] == toolId && x["why"] == "we only carry toys") return true;
                 return false; }, 40000), "...and Alice is told which hub excludes her model, and why");
@@ -437,8 +442,9 @@ int main(int argc, char** argv) {
         unsetenv("SWAMP_CATEGORIES");
         CHECK(!json::parse(lena->core.openLink("https://example.com/x")).value("ok", true), "a non-Swamp link is refused");
         CHECK(!json::parse(lena->core.openLink("swamp://model/zz12")).value("ok", true), "a damaged link is refused");
-        json ol = json::parse(lena->core.openLink("Geometric bracelet by Alice on Swamp: swamp://model/" + sharedId + "?c=other\n"));
-        CHECK(ol.value("ok", false) && ol["modelId"] == sharedId && ol["category"] == "other", "a shared message opens to its model id and category");
+        // the Share button's text: the link first, then the title - which anyone can choose, links and all
+        json ol = json::parse(lena->core.openLink("swamp://model/" + sharedId + "?c=other  Free stuff swamp://model/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee by Alice, on Swamp\n"));
+        CHECK(ol.value("ok", false) && ol["modelId"] == sharedId && ol["category"] == "other", "a shared message opens to its model id and category, not to a link planted in the title");
         json lm;
         CHECK(waitFor([&] { lm = json::parse(lena->core.getModel(sharedId)); return lm.value("ok", false); }, 15000), "...and the model opens on a node that doesn't follow its category");
         CHECK(lm.contains("model") && lm["model"].value("modelId", "") == sharedId, "...it's the shared model (" + (lm.contains("model") ? lm["model"].value("title", "") : lm.dump()) + ")");

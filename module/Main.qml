@@ -55,6 +55,7 @@ Item {
     property var draftImages: []
     property var draftKeep: []        // files carried over from the previous version: {sha256, name, size}
     property var draftParentInfo: null // the version being remixed: {modelId, v, title, creatorName, licence}
+    property bool publishing: false
     property var draftBack: null      // where Remix / New version came from: {modelId, title, tab} - Back and Cancel return there
     property int shownImage: 0        // which picture of the open version is large
 
@@ -78,8 +79,9 @@ Item {
         return (v && typeof v === "object") ? v : null
     }
     function toast(msg, err) { root.toastMsg = msg; root.toastErr = !!err; toastTimer.interval = err ? 15000 : 5000; toastTimer.restart() }
-    function act(method, args, okMsg, onOk) {
+    function act(method, args, okMsg, onOk, onDone) {
         root.core(method, args, function (raw) {
+            if (onDone) onDone()   // success or not
             var r = root.parse(raw)
             if (!r) { root.toast("Request failed - is swamp_core loaded?", true); return }
             if (r.ok === false) { root.toast(r.error || "Failed", true); return }
@@ -150,7 +152,9 @@ Item {
     function day(ms) { return ms ? new Date(ms).toISOString().slice(0, 10) : "" }
     function ver() { if (!root.model) return null; var vs = root.model.versions; var i = root.openVersion > 0 ? root.openVersion - 1 : vs.length - 1; return vs[Math.min(i, vs.length - 1)] }
     function shareLink() { return root.model ? "swamp://model/" + root.model.modelId + "?c=" + encodeURIComponent(root.model.category || "other") : "" }
-    function shareText() { return root.model ? root.model.title + " by " + (root.model.creatorName || "someone") + " on Swamp: " + root.shareLink() : "" }
+    // the link goes first: openLink takes the first link in what's pasted, and a title (which anyone
+    // can choose) must not be able to put another model's link in front of it (review 2026-10-09)
+    function shareText() { return root.model ? root.shareLink() + "  " + root.model.title + " by " + (root.model.creatorName || "someone") + ", on Swamp" : "" }
     // a pasted share link (or a whole shared message containing one) opens the model instead of searching
     function openOrSearch(text) {
         if (text.indexOf("swamp://model/") >= 0) {
@@ -167,7 +171,7 @@ Item {
     function presetCategory(id) { var cs = root.st.categories || []; for (var i = 0; i < cs.length; i++) if (cs[i].id === id) { pCategory.currentIndex = i; return } }
     function clearDraft() {
         root.draftFor = ""; root.draftParents = []; root.draftParentInfo = null; root.draftFiles = []; root.draftImages = []; root.draftKeep = []
-        pTitle.text = ""; pSummary.text = ""; pDesc.text = ""; pTags.text = ""; pLicence.currentIndex = 0
+        pTitle.text = ""; pSummary.text = ""; pDesc.text = ""; pTags.text = ""; pLicence.currentIndex = 0; pCategory.currentIndex = 0
     }
     function startRemix() {
         var v = root.ver(); if (!v) return
@@ -262,6 +266,8 @@ Item {
             delegate: ColumnLayout { Layout.fillWidth: true; spacing: 4
                 T2 { Layout.fillWidth: true; text: modelData.text || "" }
                 CommandBox { cmd: modelData.command || "" } } }
+        LogosButton { visible: !!parent.inst && parent.ist === "failed" && !!parent.inst.log; text: "Copy OrcaSlicer's output"; onClicked: root.copy(parent.inst.log, "OrcaSlicer's output") }
+        T2 { Layout.fillWidth: true; visible: !!parent.inst && !!parent.inst.fix; text: parent.inst && parent.inst.fix ? parent.inst.fix.text : ""; color: root.cText }
         Repeater { model: parent.inst && parent.inst.fix && parent.inst.fix.steps ? parent.inst.fix.steps : []   // after setting up: what's still missing
             delegate: ColumnLayout { Layout.fillWidth: true; spacing: 4
                 T2 { Layout.fillWidth: true; text: modelData.text || "" }
@@ -274,6 +280,9 @@ Item {
         property bool edited: false
         onSavedChanged: if (!activeFocus && !edited) text = saved
         onTextEdited: edited = true
+        // leaving the field with nothing changed lets it follow the core again; Escape puts the saved value back
+        onActiveFocusChanged: if (!activeFocus && text === saved) edited = false
+        Keys.onEscapePressed: { text = saved; edited = false }
         Component.onCompleted: if (saved !== "") text = saved
         Layout.fillWidth: true; Layout.minimumWidth: 80; Layout.preferredWidth: 200
         color: root.cText; placeholderTextColor: root.cText3; font.pixelSize: 13
@@ -499,7 +508,7 @@ Item {
                         }
                     }
                     Card {
-                        visible: !!root.model && !!root.st.printJob && root.st.printJob.modelId === root.model.modelId
+                        visible: !!root.st.experimentalPrint && !!root.model && !!root.st.printJob && root.st.printJob.modelId === root.model.modelId
                         T1 { text: "Print on " + (root.st.printJob ? root.st.printJob.printer : "") }
                         T2 { Layout.fillWidth: true; visible: !(root.st.printJob && root.st.printJob.stage === "failed"); text: root.st.printJob ? root.st.printJob.message : ""
                              color: root.st.printJob && root.st.printJob.stage === "sent" ? root.cOk : root.cText2 }
@@ -628,18 +637,19 @@ Item {
                     }
                     RowLayout {
                         LogosButton {
-                            text: "Publish"
+                            text: root.publishing ? "Publishing..." : "Publish"
+                            enabled: !root.publishing   // one click, one model
                             onClicked: {
                                 var d = { title: pTitle.text, summary: pSummary.text, description: pDesc.text, licence: pLicence.currentText, category: ((root.st.categories || [])[pCategory.currentIndex] || { id: "other" }).id,
                                           tags: pTags.text.split(",").map(function (t) { return t.trim() }).filter(function (t) { return t.length > 0 }),
                                           parents: root.draftParents, files: root.draftKeep.map(function (f) { return { sha256: f.sha256, name: f.name } }).concat(root.draftFiles.map(function (p) { return { path: p } })),
                                           images: root.draftImages.map(function (p) { return { path: p } }) }
                                 if (root.draftFor) d.modelId = root.draftFor
+                                root.publishing = true
                                 root.act("publish", [JSON.stringify(d)], "Published - files are uploading in the background", function (r) {
                                     root.clearDraft()
-                                    pTitle.text = ""; pSummary.text = ""; pDesc.text = ""; pTags.text = ""
                                     root.draftBack = null; root.tab = "mine"; root.openModel(r.modelId)
-                                })
+                                }, function () { root.publishing = false })
                             }
                         }
                         LogosButton { visible: !!root.draftFor || root.draftParents.length > 0; text: "Cancel"; onClicked: root.leaveDraft() }
