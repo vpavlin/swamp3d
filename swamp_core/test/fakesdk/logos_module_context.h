@@ -52,9 +52,6 @@ struct FakeStorage {
     void downloadCancelAsyncResult(const std::string& sessionId, ResCb cb, int timeoutMs);
     void downloadToUrlAsyncResult(const std::string& cid, const std::string& path, bool local, int chunk, bool isPrivate, bool advertise,
                                   std::function<void(logos::AsyncResult<StdLogosResult>)> cb, int timeoutMs);
-    // background fetch into the node's store (no event when it completes), and the check for it
-    void fetchAsyncResult(const std::string& cid, bool isPrivate, bool advertise, ResCb cb, int timeoutMs);
-    void existsAsyncResult(const std::string& cid, ResCb cb, int timeoutMs);
 };
 
 struct FakeModules { FakeLoamCore loam_core; FakeStorage storage_module; };

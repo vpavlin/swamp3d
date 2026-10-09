@@ -29,7 +29,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.7";
+static const char* SWAMP_VERSION = "0.5.6";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
@@ -53,8 +53,7 @@ static constexpr int kMaxFetches = 6;
 static constexpr int kPreviewFetches = 2;
 static constexpr long long kPreviewMaxBytes = 2 * 1024 * 1024;
 static constexpr long long kWantImgMs = 10 * 60 * 1000;    // a picture stays wanted this long after the view asked
-static constexpr int kHubConcurrency = 3;               // background fetches a hub starts per sweep
-static constexpr long long kHubCheckAfterMs = 60000;   // then asks Storage whether it has it
+static constexpr int kHubConcurrency = 3;
 static constexpr long long kImageMaxBytes = 16 * 1024 * 1024;
 static constexpr size_t kImageCacheFiles = 300;
 static constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
@@ -184,7 +183,6 @@ void SwampCoreImpl::setupDataDir() {
     m_experimentalPrint = xp && (std::string(xp) == "1" || std::string(xp) == "true");
     const char* ix = getenv("SWAMP_INDEXER");
     m_indexer = m_hub || (ix && (std::string(ix) == "1" || std::string(ix) == "true"));
-    if (const char* hc = getenv("SWAMP_HUB_CHECK_MS")) m_hubCheckMs = std::max(100LL, atoll(hc));
     if (const char* ev = getenv("SWAMP_INDEX_EVERY_MS")) m_indexEveryMs = std::max(1000LL, atoll(ev));
     if (const char* ut = getenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS")) m_indexUploadTimeoutMs = std::max(1000LL, atoll(ut));
     if (const char* ie = getenv("SWAMP_INCLUSION_EVERY_MS")) m_inclusionEveryMs = std::max(1000LL, atoll(ie));
@@ -1315,50 +1313,21 @@ void SwampCoreImpl::fetchPreviews() {
 }
 
 // A hub keeps a copy of every file it sees, so files outlive their creators' desktops.
-//
-// It asks its Storage node to fetch each CID in the background (storage_module.fetch) and counts
-// it held once exists() says so. The hub's node then serves the blocks from a public address.
-// downloadToUrl does NOT work for this: from a hub, a download from a publisher behind NAT fails
-// to start, while fetch() gets the blocks over the publisher's own connection (found live,
-// 2026-10-09; a fresh node then downloads with the publisher offline).
 void SwampCoreImpl::hubSweep() {
     if (!m_hub) return;
-    long long now = nowMs();
-    int asked = 0;
+    int inflight = 0;
+    for (const auto& [s, f] : m_fetch) inflight += f.inflight;
     for (const auto& [id, m] : m_cat.models) {
-        if (m.retracted) continue;
         for (const auto& v : m.versions) {
             json blobs = json::array();
             for (const char* k : {"files", "images"}) if (v.contains(k)) for (const auto& f : v[k]) blobs.push_back(f);
             if (v.contains("fp") && v["fp"].is_object()) blobs.push_back(v["fp"]);
             for (const auto& f : blobs) {
+                if (inflight >= kHubConcurrency) return;
                 std::string sha = f.value("sha256", "");
-                for (const auto& cid : cidsFor(sha)) {
-                    // per CID: fetch -> wait -> ask exists() -> held, or back off and fetch again
-                    HubPin& p = m_hubPins[cid];
-                    if (p.held || p.busy || now < p.next) continue;
-                    if (p.checkNext) {
-                        p.busy = true;
-                        try {
-                            modules().storage_module.existsAsyncResult(cid, [this, life = m_life, cid](logos::AsyncResult<StdLogosResult> ar) {
-                                if (*life) onLoop([this, ar, cid] {
-                                    std::lock_guard<std::recursive_mutex> lk(m_mtx);
-                                    HubPin& q = m_hubPins[cid];
-                                    q.busy = false; q.checkNext = false;
-                                    bool have = ar.ok() && ar.value.success && ar.value.value.is_boolean() && ar.value.value.get<bool>();
-                                    if (have) { q.held = true; m_hubHeld++; fprintf(stderr, "[swamp] hub: holds %s\n", cid.substr(0, 16).c_str()); publishState(); }
-                                    else q.next = nowMs() + std::min<long long>(m_hubCheckMs << std::min(q.tries - 1, 6), 60LL * 60 * 1000);
-                                });
-                            }, kStorageTimeoutMs);
-                        } catch (...) { p.busy = false; }
-                        continue;
-                    }
-                    if (asked >= kHubConcurrency) return;
-                    p.tries++; asked++;
-                    p.checkNext = true; p.next = now + m_hubCheckMs;
-                    try { modules().storage_module.fetchAsyncResult(cid, false, true, [](logos::AsyncResult<StdLogosResult>) {}, kStorageTimeoutMs); }
-                    catch (...) {}
-                }
+                if (haveBlob(sha) || !m_cat.cids.count(sha)) continue;
+                startFetch(sha, f.value("size", 0LL));
+                if (m_fetch.count(sha) && m_fetch[sha].inflight) inflight++;
             }
         }
     }
@@ -1448,7 +1417,7 @@ std::string SwampCoreImpl::snapshot() {
                            {"omissions", omissionsJson()}, {"suspects", suspectsJson()}, {"excludedMine", excludedMineJson()}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
                 {"catalog", {{"events", m_log.size()}, {"models", visible}, {"rejected", m_cat.rejected}, {"cids", m_cat.cids.size()}}},
-                {"counters", {{"hubHeld", m_hubHeld}, {"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
+                {"counters", {{"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
                               {"fetched", m_fetched}, {"verifyFailed", m_verifyFailed}, {"tooBig", m_tooBig}, {"served", m_servedEvents}, {"throttled", m_throttled}, {"staleCatchup", m_staleCatchup}, {"stalled", m_stalled},
                               {"uploading", m_upSessions.size()}, {"downloading", inflight}, {"toAnnounce", m_toAnnounce.size()}}}}.dump();
 }

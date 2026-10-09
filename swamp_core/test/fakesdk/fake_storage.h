@@ -80,15 +80,3 @@ inline void FakeStorage::downloadCancelAsyncResult(const std::string& s, ResCb c
     logos::AsyncResult<StdLogosResult> r; r.value = downloadCancel(s);
     FakeStoreNet::later(2, [cb, r] { cb(r); });
 }
-inline void FakeStorage::fetchAsyncResult(const std::string& cid, bool, bool, ResCb cb, int) {
-    FakeStoreNode* n = node;
-    FakeStoreNet::later(5, [cb] { logos::AsyncResult<StdLogosResult> r; r.value = StdLogosResult{true, "", nullptr}; cb(r); });
-    FakeStoreNet::later(60, [n, cid] {   // like the real one: copies it in if some online node holds it
-        if (n->held.count(cid)) return;
-        if (const std::string* b = FakeStoreNet::get().find(cid)) n->held[cid] = *b;
-    });
-}
-inline void FakeStorage::existsAsyncResult(const std::string& cid, ResCb cb, int) {
-    bool have = node->held.count(cid) > 0;
-    FakeStoreNet::later(2, [cb, have] { logos::AsyncResult<StdLogosResult> r; r.value = StdLogosResult{true, "", have}; cb(r); });
-}

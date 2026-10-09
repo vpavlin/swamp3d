@@ -140,10 +140,6 @@ private:
     std::vector<swamp::json> m_bambuSlicers;
     swamp::json m_slicer;
     long long m_slicerAt = 0;
-    struct HubPin { int tries = 0; long long next = 0; bool held = false, busy = false, checkNext = false; };
-    std::map<std::string, HubPin> m_hubPins;   // hub only: CID -> background fetch state
-    long m_hubHeld = 0;
-    long long m_hubCheckMs = 60000;   // SWAMP_HUB_CHECK_MS
     swamp::json m_slicerInstall;                      // {stage: downloading|unpacking|checking|done|failed, bytes, total, message, fix}
     std::atomic<long long> m_slicerBytes{0};
     swamp::json managedSlicer() const;
