@@ -183,6 +183,9 @@ void SwampCoreImpl::setupDataDir() {
     m_experimentalPrint = xp && (std::string(xp) == "1" || std::string(xp) == "true");
     const char* ix = getenv("SWAMP_INDEXER");
     m_indexer = m_hub || (ix && (std::string(ix) == "1" || std::string(ix) == "true"));
+    if (const char* hp = getenv("SWAMP_HUB_PULL_RETRY_MS")) m_hubPullRetryMs = std::max(100LL, atoll(hp));
+    if (const char* hc = getenv("SWAMP_HUB_PULL_CHECK_MS")) m_hubPullCheckMs = std::max(100LL, atoll(hc));
+    if (const char* hw = getenv("SWAMP_HUB_PULL_WRITE_MS")) m_hubPullWriteMs = std::max(100LL, atoll(hw));
     if (const char* ev = getenv("SWAMP_INDEX_EVERY_MS")) m_indexEveryMs = std::max(1000LL, atoll(ev));
     if (const char* ut = getenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS")) m_indexUploadTimeoutMs = std::max(1000LL, atoll(ut));
     if (const char* ie = getenv("SWAMP_INCLUSION_EVERY_MS")) m_inclusionEveryMs = std::max(1000LL, atoll(ie));
@@ -1317,23 +1320,99 @@ void SwampCoreImpl::fetchPreviews() {
 }
 
 // A hub keeps a copy of every file it sees, so files outlive their creators' desktops.
+// HUB: keep a copy of every file it sees, so files outlive their creators' desktops.
+//
+// Home nodes can't be dialled, but Storage's background fetch() still gets their blocks to a
+// reachable hub while they're online (it goes through relays; proven in a NAT rig, 2026-10-09).
+// fetch() returns at once and exists() turns true as soon as the MANIFEST is in - so the hub
+// checks for the whole file by writing it from local data only (downloadToUrl, local=true) and
+// verifying the sha256. Until that works it fetches again: often at first (publishers are usually
+// online right after publishing), then backing off to every 30 min.
 void SwampCoreImpl::hubSweep() {
     if (!m_hub) return;
-    int inflight = 0;
-    for (const auto& [s, f] : m_fetch) inflight += f.inflight;
+    long long now = nowMs();
+    int active = 0;
+    for (const auto& [sha, p] : m_hubPulls) active += p.stage == HubPull::Write;
     for (const auto& [id, m] : m_cat.models) {
+        if (m.retracted) continue;
         for (const auto& v : m.versions) {
             json blobs = json::array();
             for (const char* k : {"files", "images"}) if (v.contains(k)) for (const auto& f : v[k]) blobs.push_back(f);
             if (v.contains("fp") && v["fp"].is_object()) blobs.push_back(v["fp"]);
             for (const auto& f : blobs) {
-                if (inflight >= kHubConcurrency) return;
                 std::string sha = f.value("sha256", "");
-                if (haveBlob(sha) || !m_cat.cids.count(sha)) continue;
-                startFetch(sha, f.value("size", 0LL));
-                if (m_fetch.count(sha) && m_fetch[sha].inflight) inflight++;
+                long long size = f.value("size", 0LL);
+                if (sha.empty() || haveBlob(sha)) continue;
+                std::vector<std::string> cids = cidsFor(sha);
+                if (cids.empty()) continue;
+                HubPull& p = m_hubPulls[sha];
+                if (p.cid.empty()) { p.cid = cids[0]; p.size = size; }
+                hubPullStep(sha, p, now, active);
             }
         }
+    }
+}
+
+void SwampCoreImpl::hubPullStep(const std::string& sha, HubPull& p, long long now, int& active) {
+    std::string part = m_dataDir + "/parts/" + sha + ".hub";
+    std::error_code ec;
+    auto retry = [&] {
+        try { if (!p.session.empty()) modules().storage_module.downloadCancelAsyncResult(p.session, [](logos::AsyncResult<StdLogosResult>) {}, kStorageTimeoutMs); } catch (...) {}
+        fs::remove(part, ec);
+        p.session.clear(); p.tries++;
+        p.stage = p.tries % 3 == 0 ? HubPull::Fetch : HubPull::Wait;   // re-issue the fetch every third try
+        p.nextAt = now + std::min<long long>(m_hubPullRetryMs << std::min(p.tries / 3, 6), 30LL * 60 * 1000);
+        if (p.tries % 3 == 0) {   // the next candidate CID, if the catalogue has several
+            std::vector<std::string> cids = cidsFor(sha);
+            if (!cids.empty()) p.cid = cids[(size_t)(p.tries / 3) % cids.size()];
+        }
+    };
+    if (now < p.nextAt) return;
+    switch (p.stage) {
+    case HubPull::Fetch:
+        if (!storageFree()) return;
+        try {
+            modules().storage_module.fetchAsyncResult(p.cid, false, true, [this, life = m_life](logos::AsyncResult<StdLogosResult>) {
+                if (*life) onLoop([this] { std::lock_guard<std::recursive_mutex> lk(m_mtx); storageDone(); });
+            }, kStorageTimeoutMs);
+        } catch (...) { storageDone(); }
+        p.stage = HubPull::Wait; p.nextAt = now + m_hubPullCheckMs;
+        return;
+    case HubPull::Wait: {
+        if (active >= kHubConcurrency || !storageFree()) return;
+        fs::remove(part, ec);
+        p.stage = HubPull::Write; p.since = now; active++;
+        long long since = now;
+        try {
+            modules().storage_module.downloadToUrlAsyncResult(p.cid, part, true, 65536, false, true,
+                [this, life = m_life, sha, since](logos::AsyncResult<StdLogosResult> ar) {
+                    if (*life) onLoop([this, ar, sha, since] {
+                        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+                        storageDone();
+                        auto it = m_hubPulls.find(sha);
+                        if (it == m_hubPulls.end() || it->second.since != since) return;
+                        if (ar.ok() && ar.value.success) it->second.session = resVal(ar.value);
+                    });
+                }, kStorageTimeoutMs);
+        } catch (...) { storageDone(); retry(); }
+        return;
+    }
+    case HubPull::Write: {
+        long long sz = fs::exists(part, ec) ? (long long)fs::file_size(part, ec) : -1;
+        std::string got;
+        if (sz > 0 && (p.size <= 0 || sz == p.size) && sha256File(part, got) && got == sha) {
+            fs::rename(part, blobPath(sha), ec);
+            if (ec) { retry(); return; }
+            m_fetched++; m_hubHeld++;
+            fprintf(stderr, "[swamp] hub: holds %s (%lld bytes, after %d tries)\n", sha.substr(0, 12).c_str(), sz, p.tries + 1);
+            m_hubPulls.erase(sha);
+            publishState();
+            return;
+        }
+        if (p.size > 0 && sz > p.size) { m_verifyFailed++; retry(); return; }
+        if (now - p.since > m_hubPullWriteMs) retry();   // not all blocks are here yet
+        return;
+    }
     }
 }
 
@@ -1421,7 +1500,7 @@ std::string SwampCoreImpl::snapshot() {
                            {"omissions", omissionsJson()}, {"suspects", suspectsJson()}, {"excludedMine", excludedMineJson()}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
                 {"catalog", {{"events", m_log.size()}, {"models", visible}, {"rejected", m_cat.rejected}, {"cids", m_cat.cids.size()}}},
-                {"counters", {{"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
+                {"counters", {{"hubHeld", m_hubHeld}, {"hubPulling", (long)m_hubPulls.size()}, {"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
                               {"fetched", m_fetched}, {"verifyFailed", m_verifyFailed}, {"tooBig", m_tooBig}, {"served", m_servedEvents}, {"throttled", m_throttled}, {"staleCatchup", m_staleCatchup}, {"stalled", m_stalled},
                               {"uploading", m_upSessions.size()}, {"downloading", inflight}, {"toAnnounce", m_toAnnounce.size()}}}}.dump();
 }

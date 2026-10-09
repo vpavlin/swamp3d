@@ -52,13 +52,14 @@ inline StdLogosResult FakeStorage::uploadUrl(const std::string& path, int, bool)
     return StdLogosResult{true, "", sess};
 }
 inline StdLogosResult FakeStorage::manifests() { return StdLogosResult{true, "", LogosMap(node->manifests)}; }
-inline void FakeStorage::downloadToUrlAsyncResult(const std::string& cid, const std::string& path, bool, int, bool, bool advertise,
+inline void FakeStorage::downloadToUrlAsyncResult(const std::string& cid, const std::string& path, bool local, int, bool, bool advertise,
                                                   std::function<void(logos::AsyncResult<StdLogosResult>)> cb, int) {
     FakeStoreNode* n = node;
     std::string sess = n->name + "-down-" + std::to_string(++n->sess);
     FakeStoreNet::later(5, [cb, sess] { logos::AsyncResult<StdLogosResult> r; r.value = StdLogosResult{true, "", sess}; cb(r); });
-    FakeStoreNet::later(40, [n, cid, path, advertise, sess] {
-        const std::string* src = FakeStoreNet::get().find(cid);
+    FakeStoreNet::later(40, [n, cid, path, advertise, sess, local] {
+        // local=true reads only this node's own store, like the real one
+        const std::string* src = local ? (n->held.count(cid) ? &n->held[cid] : nullptr) : FakeStoreNet::get().find(cid);
         if (!src) { if (n->onDown && !n->dropEvents) n->onDown(LogosMap{{"sessionId", sess}, {"success", false}, {"error", "no provider"}}.dump()); return; }
         std::string bytes = *src;
         { std::ofstream o(path, std::ios::binary); o << bytes; }
@@ -79,4 +80,11 @@ inline void FakeStorage::manifestsAsyncResult(ResCb cb, int) {
 inline void FakeStorage::downloadCancelAsyncResult(const std::string& s, ResCb cb, int) {
     logos::AsyncResult<StdLogosResult> r; r.value = downloadCancel(s);
     FakeStoreNet::later(2, [cb, r] { cb(r); });
+}
+// background fetch into the node's store: like the real one, it gets the blocks only from an
+// online holder; a local-only download then succeeds
+inline void FakeStorage::fetchAsyncResult(const std::string& cid, bool, bool, ResCb cb, int) {
+    FakeStoreNode* n = node;
+    FakeStoreNet::later(5, [cb] { logos::AsyncResult<StdLogosResult> r; r.value = StdLogosResult{true, "", nullptr}; cb(r); });
+    FakeStoreNet::later(60, [n, cid] { if (!n->held.count(cid)) if (const std::string* b = FakeStoreNet::get().find(cid)) n->held[cid] = *b; });
 }

@@ -47,7 +47,10 @@ int main(int argc, char** argv) {
     fs::remove_all(root);
     setenv("SWAMP_TICK_MS", "60", 1);
     setenv("SWAMP_INDEX_EVERY_MS", "1000", 1);   // the hub indexes every second here
-    setenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS", "8000", 1);   // ...and gives up on a stuck shard upload after 8 s
+    setenv("SWAMP_INDEX_UPLOAD_TIMEOUT_MS", "8000", 1);
+    setenv("SWAMP_HUB_PULL_CHECK_MS", "200", 1);    // the hub's fetch -> local-write cycle, sped up
+    setenv("SWAMP_HUB_PULL_WRITE_MS", "400", 1);
+    setenv("SWAMP_HUB_PULL_RETRY_MS", "300", 1);   // ...and gives up on a stuck shard upload after 8 s
     setenv("SWAMP_INCLUSION_EVERY_MS", "1000", 1);   // creators audit indexers every second
     setenv("SWAMP_INCLUSION_GRACE_MS", "0", 1);
     setenv("SWAMP_OMISSION_CONFIRM_MS", "1500", 1);

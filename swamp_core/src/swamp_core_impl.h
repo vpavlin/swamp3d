@@ -140,6 +140,14 @@ private:
     std::vector<swamp::json> m_bambuSlicers;
     swamp::json m_slicer;
     long long m_slicerAt = 0;
+    // hub: files being pulled into our Storage node (see hubSweep)
+    struct HubPull { enum Stage { Fetch, Wait, Write } stage = Fetch; std::string cid, session; long long size = 0, nextAt = 0, since = 0; int tries = 0; };
+    std::map<std::string, HubPull> m_hubPulls;
+    long m_hubHeld = 0;
+    long long m_hubPullRetryMs = 30000;   // SWAMP_HUB_PULL_RETRY_MS: first retry delay (doubles every 3 tries, max 30 min)
+    long long m_hubPullCheckMs = 20000;   // SWAMP_HUB_PULL_CHECK_MS: after a fetch, try writing the file from local data
+    long long m_hubPullWriteMs = 20000;   // SWAMP_HUB_PULL_WRITE_MS: a local write that hasn't finished by then = blocks missing
+    void hubPullStep(const std::string& sha, HubPull& p, long long now, int& active);
     swamp::json m_slicerInstall;                      // {stage: downloading|unpacking|checking|done|failed, bytes, total, message, fix}
     std::atomic<long long> m_slicerBytes{0};
     swamp::json managedSlicer() const;
