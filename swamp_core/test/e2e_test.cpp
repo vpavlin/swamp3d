@@ -108,6 +108,8 @@ int main(int argc, char** argv) {
     std::string a, b;
     { std::ifstream f1(stl1, std::ios::binary), f2(dir + "/torus.stl", std::ios::binary); std::stringstream s1, s2; s1 << f1.rdbuf(); s2 << f2.rdbuf(); a = s1.str(); b = s2.str(); }
     CHECK(!a.empty() && a == b, "downloaded file is byte-identical to the original");
+    CHECK(waitFor([&] { return bob->snap()["counters"].value("advertised", 0) >= 1; }, 4000),
+          "bob announces the file only after it is whole and verified (downloads run with advertise=false)");
     alice->store.online = true; alice->bus.online = true;
 
     // community

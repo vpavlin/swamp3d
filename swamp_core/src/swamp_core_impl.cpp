@@ -29,7 +29,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.10";
+static const char* SWAMP_VERSION = "0.5.11";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
@@ -813,7 +813,9 @@ void SwampCoreImpl::startFetch(const std::string& sha, long long size) {
     F.inflight = true; F.since = now; F.size = size; F.cid = cid; F.session.clear(); F.seenSize = 0; F.grewAt = now;
     long long attempt = now;
     try {
-        modules().storage_module.downloadToUrlAsyncResult(cid, part, false, 65536, priv, !priv,
+        // advertise=false: announcing now would name this node a holder before it has the data
+        // (finishFetched turns it on once the file is verified)
+        modules().storage_module.downloadToUrlAsyncResult(cid, part, false, 65536, priv, false,
             [this, life = m_life, sha, attempt](logos::AsyncResult<StdLogosResult> ar) {
                 if (*life) onLoop([this, ar, sha, attempt] {
                     std::lock_guard<std::recursive_mutex> lk(m_mtx);
@@ -873,6 +875,7 @@ void SwampCoreImpl::finishFetched(const std::string& sha) {
     fs::rename(part, blobPath(sha), ec);
     if (ec) { fetchFailed(sha, "couldn't store the file: " + ec.message()); return; }
     m_fetched++;
+    if (fi != m_fetch.end() && !fi->second.cid.empty() && !m_privateFetch.count(sha)) m_toAdvertise.insert(fi->second.cid);
     m_fetch.erase(sha);
     publishState();
 }
@@ -1382,7 +1385,7 @@ void SwampCoreImpl::hubPullStep(const std::string& sha, HubPull& p, long long no
     case HubPull::Fetch:
         if (!storageFree()) return;
         try {
-            modules().storage_module.fetchAsyncResult(p.cid, false, true, [this, life = m_life](logos::AsyncResult<StdLogosResult>) {
+            modules().storage_module.fetchAsyncResult(p.cid, false, false, [this, life = m_life](logos::AsyncResult<StdLogosResult>) {
                 if (*life) onLoop([this] { std::lock_guard<std::recursive_mutex> lk(m_mtx); storageDone(); });
             }, kStorageTimeoutMs);
         } catch (...) { storageDone(); }
@@ -1394,7 +1397,7 @@ void SwampCoreImpl::hubPullStep(const std::string& sha, HubPull& p, long long no
         p.stage = HubPull::Write; p.since = now; active++;
         long long since = now;
         try {
-            modules().storage_module.downloadToUrlAsyncResult(p.cid, part, true, 65536, false, true,
+            modules().storage_module.downloadToUrlAsyncResult(p.cid, part, true, 65536, false, false,
                 [this, life = m_life, sha, since](logos::AsyncResult<StdLogosResult> ar) {
                     if (*life) onLoop([this, ar, sha, since] {
                         std::lock_guard<std::recursive_mutex> lk(m_mtx);
@@ -1414,6 +1417,7 @@ void SwampCoreImpl::hubPullStep(const std::string& sha, HubPull& p, long long no
             fs::rename(part, blobPath(sha), ec);
             if (ec) { retry(); return; }
             m_fetched++; m_hubHeld++;
+            m_toAdvertise.insert(p.cid);
             fprintf(stderr, "[swamp] hub: holds %s (%lld bytes, after %d tries)\n", sha.substr(0, 12).c_str(), sz, p.tries + 1);
             m_hubPulls.erase(sha);
             publishState();
@@ -1446,6 +1450,7 @@ void SwampCoreImpl::tick() {
             advanceJobs();
             retryUploads();
             // a download the user asked for goes first: no background fetches until it's done
+            advertiseTick();   // first: one quick call, and whole files are useless to others until announced
             if (!jobWaiting()) { fetchPreviews(); hubSweep(); }
         }
         flushAnnouncements();
@@ -1463,6 +1468,29 @@ void SwampCoreImpl::tick() {
     } catch (const std::exception& e) {
         fprintf(stderr, "[swamp] tick: %s\n", e.what());
     }
+}
+
+// Tell Storage to announce and serve data that is whole here, one call per tick (Storage calls
+// are serialized). After a restart, every file we hold is announced again: the flag is per
+// dataset in the host's Storage node, and an older Swamp may have left it off.
+void SwampCoreImpl::advertiseTick() {
+    if (!m_advertiseSeeded) {
+        m_advertiseSeeded = true;
+        for (const auto& [sha, cids] : m_cat.cids)
+            if (haveBlob(sha) && !m_myCids.count(sha)) for (const auto& c : cids) m_toAdvertise.insert(c);
+    }
+    if (m_toAdvertise.empty() || !storageFree()) return;
+    std::string cid = *m_toAdvertise.begin();
+    m_toAdvertise.erase(m_toAdvertise.begin());
+    try {
+        modules().storage_module.setAdvertiseAsyncResult(cid, true, [this, life = m_life, cid](logos::AsyncResult<StdLogosResult> ar) {
+            if (*life) onLoop([this, ar, cid] {
+                std::lock_guard<std::recursive_mutex> lk(m_mtx);
+                storageDone();
+                if (ar.ok() && ar.value.success) m_advertised++;   // an unknown CID (not ours) just fails
+            });
+        }, kStorageTimeoutMs);
+    } catch (...) { storageDone(); }
 }
 
 void SwampCoreImpl::startModules() {
@@ -1510,7 +1538,7 @@ std::string SwampCoreImpl::snapshot() {
                            {"omissions", omissionsJson()}, {"suspects", suspectsJson()}, {"excludedMine", excludedMineJson()}}},
                 {"storage", {{"hostOwned", m_storageHostOwned}, {"started", m_storageStarted}, {"dataOk", m_storageOk}, {"downloads", m_downloadsDir}}},
                 {"catalog", {{"events", m_log.size()}, {"models", visible}, {"rejected", m_cat.rejected}, {"cids", m_cat.cids.size()}}},
-                {"counters", {{"hubHeld", m_hubHeld}, {"hubPulling", (long)m_hubPulls.size()}, {"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
+                {"counters", {{"hubHeld", m_hubHeld}, {"advertised", m_advertised}, {"toAdvertise", (long)m_toAdvertise.size()}, {"hubPulling", (long)m_hubPulls.size()}, {"rx", m_rx}, {"tx", m_tx}, {"rxEvents", m_rxEvents}, {"rxBad", m_rxBad}, {"uploaded", m_uploaded},
                               {"fetched", m_fetched}, {"verifyFailed", m_verifyFailed}, {"tooBig", m_tooBig}, {"served", m_servedEvents}, {"throttled", m_throttled}, {"staleCatchup", m_staleCatchup}, {"stalled", m_stalled},
                               {"uploading", m_upSessions.size()}, {"downloading", inflight}, {"toAnnounce", m_toAnnounce.size()}}}}.dump();
 }

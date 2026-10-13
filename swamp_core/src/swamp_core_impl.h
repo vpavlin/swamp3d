@@ -143,6 +143,11 @@ private:
     // hub: files being pulled into our Storage node (see hubSweep)
     struct HubPull { enum Stage { Fetch, Wait, Write } stage = Fetch; std::string cid, session; long long size = 0, nextAt = 0, since = 0; int tries = 0; };
     std::map<std::string, HubPull> m_hubPulls;
+    // CIDs whose data is now whole and verified here: Storage is told to announce and serve them
+    // (downloads run with advertise=false, so a node never announces data it doesn't have yet)
+    std::set<std::string> m_toAdvertise;
+    long m_advertised = 0;
+    bool m_advertiseSeeded = false;
     long m_hubHeld = 0;
     long long m_hubPullRetryMs = 30000;   // SWAMP_HUB_PULL_RETRY_MS: first retry delay (doubles every 3 tries, max 30 min)
     long long m_hubPullCheckMs = 20000;   // SWAMP_HUB_PULL_CHECK_MS: after a fetch, try writing the file from local data
@@ -177,6 +182,7 @@ private:
     void pollStorage();
     void advanceJobs();
     void hubSweep();
+    void advertiseTick();
     void fetchPreviews();
     void retryUploads();
     bool storageFree();

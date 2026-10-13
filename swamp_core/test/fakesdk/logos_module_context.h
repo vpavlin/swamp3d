@@ -3,7 +3,8 @@
 // build and run outside nix/Basecamp. modules().loam_core is an in-process message bus
 // (fake_bus.h); modules().storage_module is an in-process content store (fake_storage.h) that
 // behaves like Logos Storage where it matters: CIDs depend on the file name, only ONLINE holders
-// can serve a CID, and a node that downloads with advertise=true becomes a holder.
+// can serve a CID, and a node that downloads with advertise=true (or turns it on later with
+// setAdvertise) becomes a holder; with advertise=false it keeps the data for itself.
 #include <functional>
 #include <string>
 #include <cstdint>
@@ -53,6 +54,7 @@ struct FakeStorage {
     void downloadToUrlAsyncResult(const std::string& cid, const std::string& path, bool local, int chunk, bool isPrivate, bool advertise,
                                   std::function<void(logos::AsyncResult<StdLogosResult>)> cb, int timeoutMs);
     void fetchAsyncResult(const std::string& cid, bool isPrivate, bool advertise, ResCb cb, int timeoutMs);
+    void setAdvertiseAsyncResult(const std::string& cid, bool advertise, ResCb cb, int timeoutMs);
 };
 
 struct FakeModules { FakeLoamCore loam_core; FakeStorage storage_module; };

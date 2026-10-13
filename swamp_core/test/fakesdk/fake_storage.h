@@ -13,7 +13,8 @@ struct FakeStoreNode {
     bool online = true, dropEvents = false;
     bool hangMissing = false;   // a download with no holder hangs (like the real one) instead of failing at once
     FakeStorage::EvFn onUp, onDown;
-    std::map<std::string, std::string> held;      // cid -> bytes
+    std::map<std::string, std::string> held;      // cid -> bytes, served to others
+    std::map<std::string, std::string> quiet;     // cid -> bytes, local only (advertise=false)
     std::vector<LogosMap> manifests;             // what this node uploaded
     int sess = 0;
 };
@@ -60,12 +61,12 @@ inline void FakeStorage::downloadToUrlAsyncResult(const std::string& cid, const 
     FakeStoreNet::later(5, [cb, sess] { logos::AsyncResult<StdLogosResult> r; r.value = StdLogosResult{true, "", sess}; cb(r); });
     FakeStoreNet::later(40, [n, cid, path, advertise, sess, local] {
         // local=true reads only this node's own store, like the real one
-        const std::string* src = local ? (n->held.count(cid) ? &n->held[cid] : nullptr) : FakeStoreNet::get().find(cid);
+        const std::string* src = local ? (n->held.count(cid) ? &n->held[cid] : n->quiet.count(cid) ? &n->quiet[cid] : nullptr) : FakeStoreNet::get().find(cid);
         if (!src && n->hangMissing) return;
         if (!src) { if (n->onDown && !n->dropEvents) n->onDown(LogosMap{{"sessionId", sess}, {"success", false}, {"error", "no provider"}}.dump()); return; }
         std::string bytes = *src;
         { std::ofstream o(path, std::ios::binary); o << bytes; }
-        if (advertise) n->held[cid] = bytes;
+        if (advertise) n->held[cid] = bytes; else if (!n->held.count(cid)) n->quiet[cid] = bytes;
         if (n->onDown && !n->dropEvents) n->onDown(LogosMap{{"sessionId", sess}, {"success", true}}.dump());
     });
 }
@@ -85,8 +86,20 @@ inline void FakeStorage::downloadCancelAsyncResult(const std::string& s, ResCb c
 }
 // background fetch into the node's store: like the real one, it gets the blocks only from an
 // online holder; a local-only download then succeeds
-inline void FakeStorage::fetchAsyncResult(const std::string& cid, bool, bool, ResCb cb, int) {
+inline void FakeStorage::fetchAsyncResult(const std::string& cid, bool, bool advertise, ResCb cb, int) {
     FakeStoreNode* n = node;
     FakeStoreNet::later(5, [cb] { logos::AsyncResult<StdLogosResult> r; r.value = StdLogosResult{true, "", nullptr}; cb(r); });
-    FakeStoreNet::later(60, [n, cid] { if (!n->held.count(cid)) if (const std::string* b = FakeStoreNet::get().find(cid)) n->held[cid] = *b; });
+    FakeStoreNet::later(60, [n, cid, advertise] {
+        if (n->held.count(cid)) return;
+        if (const std::string* b = FakeStoreNet::get().find(cid)) { if (advertise) n->held[cid] = *b; else n->quiet[cid] = *b; }
+    });
+}
+// turn serving on or off for data this node has
+inline void FakeStorage::setAdvertiseAsyncResult(const std::string& cid, bool advertise, ResCb cb, int) {
+    FakeStoreNode* n = node;
+    bool have = n->held.count(cid) || n->quiet.count(cid);
+    if (have && advertise && n->quiet.count(cid)) { n->held[cid] = n->quiet[cid]; n->quiet.erase(cid); }
+    if (have && !advertise && n->held.count(cid)) { n->quiet[cid] = n->held[cid]; n->held.erase(cid); }
+    logos::AsyncResult<StdLogosResult> r; r.value = StdLogosResult{have, have ? "" : "unknown cid", nullptr};
+    FakeStoreNet::later(2, [cb, r] { cb(r); });
 }
