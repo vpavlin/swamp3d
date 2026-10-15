@@ -213,6 +213,8 @@ Item {
         return ""
     }
     function pathOf(u) { var s = String(u); return s.indexOf("file://") === 0 ? decodeURIComponent(s.slice(7)) : s }
+    // a local path as a file:// URL (for Qt.openUrlExternally: "Open folder"); was lost in 0.1.2 with the old picture paths
+    function fileUrl(p) { return "file://" + encodeURI(String(p)) }
 
     // ── pieces ─────────────────────────────────────────────────────────────────
     component T1: Text { textFormat: Text.PlainText; color: root.cText; font.pixelSize: 16; font.weight: Font.DemiBold; wrapMode: Text.Wrap }
