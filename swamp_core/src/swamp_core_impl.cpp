@@ -29,7 +29,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.11";
+static const char* SWAMP_VERSION = "0.5.13";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
@@ -49,6 +49,7 @@ static constexpr size_t kFrameBytes = 48 * 1024;     // events batched per frame
 static constexpr size_t kCidsPerEvent = 64;
 static constexpr long long kAnnounceHoldMs = 10000;
 static constexpr int kMaxFetches = 6;
+static constexpr long long kJobRetryMaxMs = 2 * 60 * 1000;   // longest wait between tries of a file being downloaded
 static constexpr int kPreviewFetches = 2;
 static constexpr long long kPreviewMaxBytes = 2 * 1024 * 1024;
 static constexpr long long kWantImgMs = 10 * 60 * 1000;    // a picture stays wanted this long after the view asked
@@ -631,6 +632,14 @@ void SwampCoreImpl::ensureStorage() {
     }
 }
 
+bool SwampCoreImpl::wantedByJob(const std::string& sha) {
+    for (const auto& [key, j] : m_jobs) {
+        if (j.status == "done" || j.status == "failed") continue;
+        for (const auto& [s2, name] : j.files) if (s2 == sha) return true;
+    }
+    return false;
+}
+
 bool SwampCoreImpl::jobWaiting() {
     for (const auto& [key, j] : m_jobs) {
         if (j.status == "done" || j.status == "failed") continue;
@@ -845,7 +854,14 @@ void SwampCoreImpl::fetchFailed(const std::string& sha, const std::string& why) 
     size_t n = cidsFor(sha).size();
     // a private (Mix) fetch that keeps failing falls back to a plain one, and says so
     if (m_privateFetch.count(sha) && F.rounds >= kPrivateRounds - 1 && F.cidIdx + 1 >= n) { m_privateFetch.erase(sha); m_privacyDowngrades++; }
-    if (++F.cidIdx >= n) { F.cidIdx = 0; F.rounds++; F.nextTry = nowMs() + backoffMs(F.rounds); }
+    if (++F.cidIdx >= n) {
+        F.cidIdx = 0; F.rounds++;
+        long long wait = backoffMs(F.rounds);
+        // a file someone asked to download keeps trying every couple of minutes: a hub that pulls it
+        // shows up as a holder minutes later, and nothing else tells us it did
+        if (wait > kJobRetryMaxMs && wantedByJob(sha)) wait = kJobRetryMaxMs;
+        F.nextTry = nowMs() + wait;
+    }
     else F.nextTry = 0;   // another candidate: try it straight away
 }
 

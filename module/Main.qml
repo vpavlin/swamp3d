@@ -13,20 +13,26 @@ Item {
     id: root
     anchors.fill: parent
 
-    readonly property color cBg: Theme.palette.background || "#10130f"
-    readonly property color cCard: Theme.palette.backgroundElevated || "#181d16"
-    readonly property color cInset: Theme.palette.backgroundInset || "#0b0d0a"
-    readonly property color cLine: Theme.palette.borderHairline || "#2a3326"
-    readonly property color cText: Theme.palette.text || "#eef2e8"
-    readonly property color cText2: Theme.palette.textSecondary || "#c2cbb8"
-    readonly property color cText3: Theme.palette.textTertiary || "#8b9682"
-    readonly property color cPrimary: Theme.palette.primary || "#8fbf5a"
-    readonly property color cOk: Theme.palette.success || "#5fb85a"
-    readonly property color cWarn: Theme.palette.warning || "#e0a03a"
-    readonly property color cErr: Theme.palette.error || "#e5534b"
+    // the website's palette (site/index.html :root): mud, moss and reed, slime and duck
+    readonly property color cBg: "#0d1610"        // mud
+    readonly property color cCard: "#1c2e20"      // moss
+    readonly property color cInset: "#132017"     // mud2
+    readonly property color cLine: "#2b4630"      // reed
+    readonly property color cText: "#e7efe0"
+    readonly property color cText2: "#b9c7ad"
+    readonly property color cText3: "#839377"
+    readonly property color cPrimary: "#8fd14f"   // slime
+    readonly property color cPrimary2: "#b8f26b"  // slime2
+    readonly property color cDuck: "#e8c547"
+    readonly property color cBeak: "#f08a24"
+    readonly property color cInk: "#10200c"       // text on slime
+    readonly property color cOk: "#8fd14f"
+    readonly property color cWarn: "#f2b134"
+    readonly property color cErr: "#e5534b"
     readonly property int sp: Theme.spacing.medium || 12
     readonly property int spS: Theme.spacing.small || 8
-    readonly property int rad: Theme.spacing.radiusSmall || 6
+    readonly property int rad: 10
+    readonly property int radCard: 18
 
     property string tab: "browse"
     property var st: ({})
@@ -217,6 +223,53 @@ Item {
     function fileUrl(p) { return "file://" + encodeURI(String(p)) }
 
     // ── pieces ─────────────────────────────────────────────────────────────────
+    // the website's pill button: outlined, or solid slime for the main action
+    component SwampButton: Rectangle {
+        id: sb
+        property string text: ""
+        property bool primary: false
+        readonly property bool hovered: ma.containsMouse   // as Button has, for ToolTip.visible
+        signal clicked()
+        implicitWidth: Math.max(72, lbl.implicitWidth + 30)
+        implicitHeight: 34
+        radius: height / 2
+        opacity: enabled ? 1 : 0.4
+        color: primary ? (ma.containsMouse ? root.cPrimary2 : root.cPrimary) : (ma.containsMouse ? "#22381f" : "transparent")
+        border.width: 2
+        border.color: root.cPrimary
+        rotation: ma.containsMouse && enabled ? -1 : 0
+        Behavior on rotation { NumberAnimation { duration: 120 } }
+        Text {
+            id: lbl
+            anchors.centerIn: parent
+            width: Math.min(implicitWidth, sb.width - 16)
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            text: sb.text
+            textFormat: Text.PlainText
+            color: sb.primary ? root.cInk : root.cPrimary2
+            font.pixelSize: 13; font.weight: Font.Bold
+        }
+        MouseArea { id: ma; anchors.fill: parent; hoverEnabled: true; enabled: sb.enabled; cursorShape: Qt.PointingHandCursor; onClicked: sb.clicked() }
+    }
+    // a drop-down in the swamp colours: a dark field, a slime arrow, a moss list
+    component SwampCombo: ComboBox {
+        id: cb
+        implicitHeight: 34
+        font.pixelSize: 13
+        background: Rectangle { color: root.cInset; radius: root.rad; border.width: cb.activeFocus || cb.hovered ? 2 : 1; border.color: cb.activeFocus || cb.hovered ? root.cPrimary : root.cLine }
+        contentItem: Text { leftPadding: 12; rightPadding: 30; text: cb.displayText; color: root.cText; font: cb.font; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight; textFormat: Text.PlainText }
+        indicator: Text { x: cb.width - width - 12; anchors.verticalCenter: parent.verticalCenter; text: "▾"; color: root.cPrimary2; font.pixelSize: 14 }
+        delegate: ItemDelegate {
+            required property var modelData
+            required property int index
+            width: cb.width
+            highlighted: cb.highlightedIndex === index
+            contentItem: Text { text: String(typeof modelData === "object" && modelData !== null ? (modelData[cb.textRole] || modelData.label || "") : modelData).replace(/&&/g, "&"); color: highlighted ? root.cInk : root.cText; font: cb.font; elide: Text.ElideRight; textFormat: Text.PlainText }
+            background: Rectangle { color: highlighted ? root.cPrimary : "transparent"; radius: 6 }
+        }
+        popup.background: Rectangle { color: root.cCard; radius: root.rad; border.color: root.cPrimary }
+    }
     component T1: Text { textFormat: Text.PlainText; color: root.cText; font.pixelSize: 16; font.weight: Font.DemiBold; wrapMode: Text.Wrap }
     component T2: Text { textFormat: Text.PlainText; color: root.cText2; font.pixelSize: 13; wrapMode: Text.Wrap }
     component T3: Text { textFormat: Text.PlainText; color: root.cText3; font.pixelSize: 11; wrapMode: Text.Wrap }
@@ -224,8 +277,8 @@ Item {
         default property alias content: inner.data
         Layout.fillWidth: true
         implicitHeight: inner.implicitHeight + 2 * root.sp
-        color: root.cCard; radius: root.rad + 4; border.color: root.cLine
-        ColumnLayout { id: inner; anchors.fill: parent; anchors.margins: root.sp; spacing: root.spS }
+        color: root.cCard; radius: root.radCard; border.color: root.cLine
+        ColumnLayout { id: inner; anchors.fill: parent; anchors.margins: root.sp + 4; spacing: root.spS }
     }
     // a command to run: shown as-is, selectable, with a Copy button - nobody retypes a command
     component CommandBox: Rectangle {
@@ -236,7 +289,7 @@ Item {
         TextEdit { id: cmdT; readOnly: true; selectByMouse: true; textFormat: TextEdit.PlainText; wrapMode: TextEdit.WrapAnywhere
             anchors.left: parent.left; anchors.right: cmdCopy.left; anchors.verticalCenter: parent.verticalCenter; anchors.margins: 8
             text: parent.cmd; color: root.cText; font.family: "monospace"; font.pixelSize: 12 }
-        LogosButton { id: cmdCopy; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.rightMargin: 4
+        SwampButton { id: cmdCopy; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.rightMargin: 4
             text: "Copy"; onClicked: root.copy(parent.cmd, "Command") }
     }
     // an error you can copy (to search for it, or to send it to someone)
@@ -245,7 +298,7 @@ Item {
         Layout.fillWidth: true; visible: msg !== ""; spacing: root.spS
         TextEdit { Layout.fillWidth: true; readOnly: true; selectByMouse: true; textFormat: TextEdit.PlainText; wrapMode: TextEdit.Wrap
             text: parent.msg; color: root.cErr; font.pixelSize: 13 }
-        LogosButton { text: "Copy"; onClicked: root.copy(parent.msg, "Error") }
+        SwampButton { text: "Copy"; onClicked: root.copy(parent.msg, "Error") }
     }
     // "here's what's wrong and what to do": {title, text, steps:[{text, command}], action}
     component FixPanel: ColumnLayout {
@@ -257,9 +310,9 @@ Item {
         T1 { Layout.fillWidth: true; text: parent.fix ? parent.fix.title : ""; color: root.cWarn }
         T2 { Layout.fillWidth: true; text: parent.fix ? parent.fix.text : ""; color: root.cText }
         RowLayout { spacing: root.spS; visible: !!parent.fix && parent.fix.action === "installSlicer"
-            LogosButton { text: "Set up OrcaSlicer 2.4.2 for me"; enabled: ["downloading", "unpacking", "checking"].indexOf(parent.parent.ist) < 0 && parent.parent.ist !== "done"
+            SwampButton { text: "Set up OrcaSlicer 2.4.2 for me"; enabled: ["downloading", "unpacking", "checking"].indexOf(parent.parent.ist) < 0 && parent.parent.ist !== "done"
                 onClicked: root.act("installSlicer", [], "") }
-            LogosButton { visible: parent.parent.ist === "done" && !!parent.parent.retry; text: "Try again"; onClicked: parent.parent.retry() }
+            SwampButton { visible: parent.parent.ist === "done" && !!parent.parent.retry; text: "Try again"; onClicked: parent.parent.retry() }
         }
         ProgressBar { Layout.fillWidth: true; visible: parent.ist === "downloading"; from: 0; to: parent.inst && parent.inst.total ? parent.inst.total : 1; value: parent.inst ? (parent.inst.bytes || 0) : 0 }
         T2 { Layout.fillWidth: true; visible: !!parent.inst && parent.ist !== ""; color: parent.ist === "failed" ? root.cErr : (parent.ist === "done" ? root.cOk : root.cText2)
@@ -268,7 +321,7 @@ Item {
             delegate: ColumnLayout { Layout.fillWidth: true; spacing: 4
                 T2 { Layout.fillWidth: true; text: modelData.text || "" }
                 CommandBox { cmd: modelData.command || "" } } }
-        LogosButton { visible: !!parent.inst && parent.ist === "failed" && !!parent.inst.log; text: "Copy OrcaSlicer's output"; onClicked: root.copy(parent.inst.log, "OrcaSlicer's output") }
+        SwampButton { visible: !!parent.inst && parent.ist === "failed" && !!parent.inst.log; text: "Copy OrcaSlicer's output"; onClicked: root.copy(parent.inst.log, "OrcaSlicer's output") }
         T2 { Layout.fillWidth: true; visible: !!parent.inst && !!parent.inst.fix; text: parent.inst && parent.inst.fix ? parent.inst.fix.text : ""; color: root.cText }
         Repeater { model: parent.inst && parent.inst.fix && parent.inst.fix.steps ? parent.inst.fix.steps : []   // after setting up: what's still missing
             delegate: ColumnLayout { Layout.fillWidth: true; spacing: 4
@@ -298,7 +351,11 @@ Item {
     component ModelCard: Rectangle {
         property var m: ({})
         Layout.fillWidth: true; Layout.maximumWidth: 420; Layout.preferredHeight: 300
-        color: root.cCard; radius: root.rad + 4; border.color: hov.containsMouse ? root.cPrimary : root.cLine
+        color: root.cCard; radius: root.radCard; border.color: hov.containsMouse ? root.cPrimary : root.cLine
+        border.width: hov.containsMouse ? 2 : 1
+        // a little lift, like the website's cards
+        y: hov.containsMouse ? -3 : 0
+        Behavior on y { NumberAnimation { duration: 120 } }
         ColumnLayout {
             anchors.fill: parent; anchors.margins: root.spS; spacing: 4
             Thumb { Layout.fillWidth: true; Layout.preferredHeight: 190; path: m.thumb || m.thumbSha || "" }
@@ -327,28 +384,85 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: root.sp + 4
-        spacing: root.sp
+        spacing: 0
 
-        RowLayout {
+        // the website's header: slime, with the duck, dripping into the bog
+        Rectangle {
             Layout.fillWidth: true
-            spacing: root.sp
-            ColumnLayout {
-                spacing: 0
-                Text { textFormat: Text.PlainText; text: "Swamp"; color: root.cText; font.pixelSize: 22; font.weight: Font.Bold }
-                T3 { text: "3D models nobody can take down - built on the Logos tech stack, not affiliated with Logos" }
+            Layout.preferredHeight: 64
+            color: root.cPrimary
+            z: 2
+            RowLayout {
+                anchors.fill: parent; anchors.leftMargin: root.sp + 6; anchors.rightMargin: root.sp + 6
+                spacing: root.sp
+                Rectangle {
+                    Layout.preferredWidth: 42; Layout.preferredHeight: 42; radius: 11; clip: true; color: root.cInk
+                    Image { anchors.fill: parent; source: "icon.png"; fillMode: Image.PreserveAspectCrop; smooth: true }
+                }
+                ColumnLayout {
+                    spacing: -2
+                    Text { textFormat: Text.PlainText; text: "Swamp"; color: root.cInk; font.pixelSize: 22; font.weight: Font.Black; font.letterSpacing: 0.5 }
+                    Text { textFormat: Text.PlainText; text: "3D models nobody can take down"; color: root.cInk; opacity: 0.75; font.pixelSize: 12; font.weight: Font.DemiBold }
+                }
+                Item { Layout.fillWidth: true }
+                Repeater {
+                    model: [["browse", "Browse"], ["publish", "Publish"], ["mine", "My models"], ["me", "Me"]]
+                    delegate: Rectangle {
+                        required property var modelData
+                        readonly property bool on: root.tab === modelData[0] && !root.openId
+                        implicitWidth: tabLbl.implicitWidth + 30; implicitHeight: 34; radius: 17
+                        color: on ? root.cInk : (tabMa.containsMouse ? "#7dbd43" : "transparent")
+                        border.width: 2; border.color: root.cInk
+                        Text { id: tabLbl; anchors.centerIn: parent; text: parent.modelData[1]; textFormat: Text.PlainText
+                            color: parent.on ? root.cPrimary2 : root.cInk; font.pixelSize: 13; font.weight: Font.Bold }
+                        MouseArea { id: tabMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: { root.openId = ""; root.model = null; root.tab = parent.modelData[0]; root.refresh() } }
+                    }
+                }
             }
-            Item { Layout.fillWidth: true }
+            // drips hanging off the band, each with a drop that forms and falls (the website's header)
             Repeater {
-                model: [["browse", "Browse"], ["publish", "Publish"], ["mine", "My models"], ["me", "Me"]]
-                delegate: LogosButton { Layout.preferredWidth: 110; text: (root.tab === modelData[0] && !root.openId ? "> " : "") + modelData[1]
-                    onClicked: { root.openId = ""; root.model = null; root.tab = modelData[0]; root.refresh() } }
+                model: [[0.05, 13, 18, 2600], [0.15, 9, 11, 3300], [0.27, 15, 22, 2900], [0.40, 10, 13, 3700], [0.53, 12, 19, 3100], [0.64, 9, 10, 2700], [0.76, 14, 21, 3500], [0.88, 10, 12, 3000], [0.97, 12, 15, 3400]]
+                delegate: Item {
+                    id: drip
+                    required property var modelData
+                    x: parent.width * modelData[0]; y: parent.height - 1
+                    width: modelData[1]; height: modelData[2] + 30
+                    Rectangle {
+                        id: stem
+                        width: drip.width; height: drip.modelData[2]
+                        radius: width / 2; color: root.cPrimary
+                        transformOrigin: Item.Top
+                        SequentialAnimation on scale {
+                            loops: Animation.Infinite
+                            NumberAnimation { from: 0.55; to: 1.0; duration: drip.modelData[3] / 2; easing.type: Easing.InOutSine }
+                            NumberAnimation { from: 1.0; to: 0.55; duration: drip.modelData[3] / 2; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Rectangle {
+                        width: drip.width * 0.6; height: width; radius: width / 2; color: root.cPrimary
+                        x: (drip.width - width) / 2
+                        SequentialAnimation on y {
+                            loops: Animation.Infinite
+                            PauseAnimation { duration: drip.modelData[3] * 0.5 }
+                            NumberAnimation { from: drip.modelData[2] - 6; to: drip.modelData[2] + 12; duration: drip.modelData[3] * 0.5; easing.type: Easing.InQuad }
+                        }
+                        SequentialAnimation on opacity {
+                            loops: Animation.Infinite
+                            NumberAnimation { to: 0; duration: drip.modelData[3] * 0.55 }
+                            NumberAnimation { to: 1; duration: drip.modelData[3] * 0.1 }
+                            NumberAnimation { to: 0; duration: drip.modelData[3] * 0.35 }
+                        }
+                    }
+                }
             }
         }
+        Item { Layout.preferredHeight: 40 }
 
         ScrollView {
             id: scroller
             Layout.fillWidth: true; Layout.fillHeight: true
+            Layout.leftMargin: root.sp + 4; Layout.rightMargin: root.sp + 4; Layout.bottomMargin: root.sp
             clip: true; contentWidth: availableWidth
 
             ColumnLayout {
@@ -363,9 +477,9 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         Field { id: search; placeholderText: "Search models, tags... or paste a swamp:// link"; onAccepted: root.openOrSearch(text) }
-                        ComboBox { id: sortBox; model: ["Newest", "Most liked", "Most made"]; Layout.preferredWidth: 160
+                        SwampCombo { id: sortBox; model: ["Newest", "Most liked", "Most made"]; Layout.preferredWidth: 160
                             onActivated: { root.sortBy = ["new", "likes", "makes"][currentIndex]; root.refresh() } }
-                        LogosButton { text: "Search"; onClicked: root.openOrSearch(search.text) }
+                        SwampButton { primary: true; text: "Search"; onClicked: root.openOrSearch(search.text) }
                     }
                     Flow {
                         Layout.fillWidth: true; spacing: 6
@@ -389,8 +503,8 @@ Item {
                             model: root.tags
                             delegate: Rectangle {
                                 width: tt.implicitWidth + 18; height: 26; radius: 13
-                                color: root.tagFilter === modelData.tag ? root.cPrimary : root.cCard; border.color: root.cLine
-                                Text { id: tt; textFormat: Text.PlainText; anchors.centerIn: parent; text: modelData.tag + " " + modelData.count; color: root.tagFilter === modelData.tag ? root.cBg : root.cText2; font.pixelSize: 12 }
+                                color: root.tagFilter === modelData.tag ? root.cDuck : "#2a2610"; border.color: root.cDuck
+                                Text { id: tt; textFormat: Text.PlainText; anchors.centerIn: parent; text: "#" + modelData.tag + " " + modelData.count; color: root.tagFilter === modelData.tag ? root.cInk : root.cDuck; font.pixelSize: 12 }
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.tagFilter = root.tagFilter === modelData.tag ? "" : modelData.tag; root.refresh() } }
                             }
                         }
@@ -436,7 +550,7 @@ Item {
                     spacing: root.sp
                     RowLayout {
                         Layout.fillWidth: true
-                        LogosButton { text: "< Back"; onClicked: { root.openId = ""; root.model = null; root.refresh() } }
+                        SwampButton { text: "< Back"; onClicked: { root.openId = ""; root.model = null; root.refresh() } }
                         Item { Layout.fillWidth: true }
                         T3 { visible: !root.model; text: root.modelNote || "loading..." }
                     }
@@ -468,42 +582,42 @@ Item {
                                 T3 { Layout.fillWidth: true; visible: !!root.model && root.model.retracted; color: root.cWarn; text: "The creator retracted this model" + (root.model && root.model.retractReason ? ": " + root.model.retractReason : "") }
                                 RowLayout {
                                     T3 { text: "Version" }
-                                    ComboBox { id: verBox; Layout.preferredWidth: 120
+                                    SwampCombo { id: verBox; Layout.preferredWidth: 120
                                         model: root.model ? root.model.versions.map(function (v) { return "v" + v.v }) : []
                                         currentIndex: root.model ? (root.openVersion > 0 ? root.openVersion - 1 : root.model.versions.length - 1) : 0
                                         onActivated: root.openVersion = currentIndex + 1 }
                                 }
                                 Flow { Layout.fillWidth: true; spacing: 6
                                     Repeater { model: root.ver() ? (root.ver().tags || []) : []
-                                        delegate: Rectangle { width: tg.implicitWidth + 14; height: 22; radius: 11; color: root.cInset; border.color: root.cLine
-                                            Text { id: tg; textFormat: Text.PlainText; anchors.centerIn: parent; text: modelData; color: root.cText2; font.pixelSize: 11 } } } }
+                                        delegate: Rectangle { width: tg.implicitWidth + 16; height: 22; radius: 11; color: "#2a2610"; border.color: root.cDuck
+                                            Text { id: tg; textFormat: Text.PlainText; anchors.centerIn: parent; text: "#" + modelData; color: root.cDuck; font.pixelSize: 11; font.weight: Font.DemiBold } } } }
                                 // fixed slots: a button never moves because another one appeared
                                 RowLayout {
                                     spacing: root.spS
-                                    LogosButton { Layout.preferredWidth: 130; text: { var d = root.ver() && root.ver().download; return d ? (d.status === "done" ? "Download again" : d.status === "failed" ? "Retry download" : "Downloading...") : "Download" }
+                                    SwampButton { primary: true; Layout.preferredWidth: 140; text: { var d = root.ver() && root.ver().download; return d ? (d.status === "done" ? "Download again" : d.status === "failed" ? "Retry download" : "Downloading...") : "Download" }
                                         onClicked: root.act("download", [root.model.modelId, String(root.ver().v)], "Downloading into your Swamp folder") }
-                                    LogosButton { Layout.preferredWidth: 110; enabled: !!(root.ver() && root.ver().download && root.ver().download.status === "done"); text: "Open folder"
+                                    SwampButton { Layout.preferredWidth: 110; enabled: !!(root.ver() && root.ver().download && root.ver().download.status === "done"); text: "Open folder"
                                         onClicked: Qt.openUrlExternally(root.fileUrl(root.ver().download.dir)) }
                                     // hand the verified model files to the slicer you already use; print from there
-                                    LogosButton { Layout.preferredWidth: 170
+                                    SwampButton { Layout.preferredWidth: 170
                                         enabled: !!root.st.slicer
                                         text: root.st.slicer ? "Open in " + root.st.slicer.name.replace(" (Flatpak)", "").replace(" (AppImage)", "") : "Open in slicer"
                                         ToolTip.visible: hovered; ToolTip.text: root.st.slicer ? "Downloads and verifies the files if needed, then opens them in " + root.st.slicer.name : "Install OrcaSlicer, Bambu Studio or PrusaSlicer to open models in it from here"
                                         onClicked: root.act("openInSlicer", [root.model.modelId, String(root.ver().v)], "Opening in " + (root.st.slicer ? root.st.slicer.name : "your slicer") + "...") }
-                                    LogosButton { Layout.preferredWidth: 150
+                                    SwampButton { Layout.preferredWidth: 150
                                         visible: !!root.st.printer && !!root.st.experimentalPrint
                                         enabled: !!root.st.printer && root.st.printer.supported && !root.printBusy
                                         text: root.st.printer ? "Print on " + root.st.printer.name.replace("Bambu Lab ", "") : "Print"
                                         ToolTip.visible: hovered; ToolTip.text: "Slices with the printer's default profile (0.20 mm, PLA) and sends it over your LAN after you confirm"
                                         onClicked: root.act("preparePrint", [root.model.modelId, String(root.ver().v)], "") }
-                                    LogosButton { Layout.preferredWidth: 110; text: root.model && root.model.likedByMe ? "Unlike (" + root.model.likes + ")" : "Like (" + (root.model ? root.model.likes : 0) + ")"
+                                    SwampButton { Layout.preferredWidth: 110; text: root.model && root.model.likedByMe ? "Unlike (" + root.model.likes + ")" : "Like (" + (root.model ? root.model.likes : 0) + ")"
                                         onClicked: root.act("like", [root.model.modelId, root.model.likedByMe ? "false" : "true"], "") }
-                                    LogosButton { Layout.preferredWidth: 100; text: "Remix"; onClicked: root.startRemix() }
-                                    LogosButton { Layout.preferredWidth: 100; text: "Share"
+                                    SwampButton { Layout.preferredWidth: 100; text: "Remix"; onClicked: root.startRemix() }
+                                    SwampButton { Layout.preferredWidth: 100; text: "Share"
                                         ToolTip.visible: hovered; ToolTip.text: "Copies a link. Anyone with Swamp can paste it into the search box to open this model."
                                         onClicked: root.copy(root.shareText(), "Link") }
-                                    LogosButton { Layout.preferredWidth: 120; visible: !!root.model && root.model.mine; text: "New version"; onClicked: root.startNewVersion() }
-                                    LogosButton { Layout.preferredWidth: 100; visible: !!root.model && root.model.mine && !root.model.retracted; text: "Retract"; onClicked: retractDlg.open() }
+                                    SwampButton { Layout.preferredWidth: 120; visible: !!root.model && root.model.mine; text: "New version"; onClicked: root.startNewVersion() }
+                                    SwampButton { Layout.preferredWidth: 100; visible: !!root.model && root.model.mine && !root.model.retracted; text: "Retract"; onClicked: retractDlg.open() }
                                 }
                                 ErrorLine { msg: root.ver() && root.ver().download ? (root.ver().download.error || "") : "" }
                             }
@@ -517,14 +631,14 @@ Item {
                         ErrorLine { msg: root.st.printJob && root.st.printJob.stage === "failed" ? (root.st.printJob.message || "") : "" }
                         FixPanel { fix: root.st.printJob && root.st.printJob.stage === "failed" ? (root.st.printJob.fix || null) : null
                             retry: function () { root.act("preparePrint", [root.model.modelId, String(root.ver().v)], "") } }
-                        LogosButton { visible: !!root.st.printJob && root.st.printJob.stage === "failed" && !!root.st.printJob.log; text: "Copy the slicer's output"
+                        SwampButton { visible: !!root.st.printJob && root.st.printJob.stage === "failed" && !!root.st.printJob.log; text: "Copy the slicer's output"
                             onClicked: root.copy(root.st.printJob.log, "Slicer output") }
                         T2 { Layout.fillWidth: true; visible: !!root.st.printJob && !!root.st.printJob.estimate
                              text: root.st.printJob && root.st.printJob.estimate ? "About " + root.st.printJob.estimate.time + "  ·  " + (root.st.printJob.estimate.filamentG || "?") + " g of PLA (" + (root.st.printJob.estimate.filamentM || "?") + " m)  ·  " + (root.st.printJob.estimate.layers || "?") + " layers  ·  " + root.st.printJob.profile : "" }
                         ProgressBar { Layout.fillWidth: true; visible: !!root.st.printJob && root.st.printJob.stage === "uploading"; from: 0; to: 100; value: root.st.printJob ? (root.st.printJob.progress || 0) : 0 }
                         RowLayout { spacing: root.spS
-                            LogosButton { visible: !!root.st.printJob && root.st.printJob.stage === "ready"; text: "Start print"; onClicked: printConfirm.open() }
-                            LogosButton { visible: !!root.st.printJob && ["ready", "failed", "sent", "downloading", "slicing"].indexOf(root.st.printJob.stage) >= 0
+                            SwampButton { primary: true; visible: !!root.st.printJob && root.st.printJob.stage === "ready"; text: "Start print"; onClicked: printConfirm.open() }
+                            SwampButton { visible: !!root.st.printJob && ["ready", "failed", "sent", "downloading", "slicing"].indexOf(root.st.printJob.stage) >= 0
                                 text: root.st.printJob && (root.st.printJob.stage === "sent" || root.st.printJob.stage === "failed") ? "Close" : "Cancel"
                                 onClicked: root.act("cancelPrint", [], "") }
                         }
@@ -565,8 +679,8 @@ Item {
                             Layout.fillWidth: true
                             Field { id: makeText; placeholderText: "Printed it? Settings, material, how it went" }
                             Field { id: makePhoto; placeholderText: "photo path"; Layout.preferredWidth: 160 }
-                            LogosButton { text: "Photo..."; onClicked: makeDlg.open() }
-                            LogosButton { text: "Post make"
+                            SwampButton { text: "Photo..."; onClicked: makeDlg.open() }
+                            SwampButton { primary: true; text: "Post make"
                                 onClicked: root.act("postMake", [root.model.modelId, JSON.stringify({ text: makeText.text, v: root.ver().v, images: makePhoto.text ? [makePhoto.text] : [] })], "Make posted",
                                                     function () { makeText.text = ""; makePhoto.text = "" }) }
                         }
@@ -587,14 +701,14 @@ Item {
                                 T3 { text: modelData.authorName + "  ·  " + root.day(modelData.at) } } }
                         RowLayout { Layout.fillWidth: true
                             Field { id: commentText; placeholderText: "Say something nice (or useful)" }
-                            LogosButton { text: "Comment"; onClicked: root.act("comment", [root.model.modelId, commentText.text], "", function () { commentText.text = "" }) } }
+                            SwampButton { text: "Comment"; onClicked: root.act("comment", [root.model.modelId, commentText.text], "", function () { commentText.text = "" }) } }
                     }
                 }
 
                 // ════ PUBLISH ════
                 Card {
                     visible: root.tab === "publish" && !root.openId
-                    LogosButton { visible: !!root.draftBack; text: "< Back to " + (root.draftBack ? root.draftBack.title : ""); onClicked: root.leaveDraft() }
+                    SwampButton { visible: !!root.draftBack; text: "< Back to " + (root.draftBack ? root.draftBack.title : ""); onClicked: root.leaveDraft() }
                     T1 { text: root.draftFor ? "Publish a new version" : (root.draftParents.length ? "Publish a remix" : "Publish a model") }
                     T2 { Layout.fillWidth: true; visible: !!root.draftParentInfo; color: root.cText
                         text: root.draftParentInfo ? "Remixing " + root.draftParentInfo.title + " v" + root.draftParentInfo.v + " by " + root.draftParentInfo.creatorName + " (" + root.draftParentInfo.licence + "). The original is credited and linked." : "" }
@@ -612,13 +726,13 @@ Item {
                         T3 { text: "Tags" }
                         Field { id: pTags; placeholderText: "comma separated, e.g. tool, organizer, gridfinity" }
                         T3 { text: "Category" }
-                        ComboBox { id: pCategory; Layout.fillWidth: true; enabled: !root.draftFor
+                        SwampCombo { id: pCategory; Layout.fillWidth: true; enabled: !root.draftFor
                             // a lone & is a keyboard-mnemonic marker in the list items, but not in the closed box
                             model: (root.st.categories || []).map(function (c) { return c.label.replace(/&/g, "&&") })
                             displayText: currentText.replace(/&&/g, "&")
                             ToolTip.visible: hovered && !enabled; ToolTip.text: "A model keeps the category it was created in" }
                         T3 { text: "Licence" }
-                        ComboBox { id: pLicence; model: root.licences; Layout.fillWidth: true }
+                        SwampCombo { id: pLicence; model: root.licences; Layout.fillWidth: true }
                         T3 { text: "Files" }
                         ColumnLayout { Layout.fillWidth: true
                             Repeater { model: root.draftKeep
@@ -626,19 +740,20 @@ Item {
                                     Text { textFormat: Text.PlainText; text: "remove"; color: root.cPrimary; font.pixelSize: 11; font.underline: true
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var a = root.draftKeep.slice(); a.splice(index, 1); root.draftKeep = a } } } } }
                             Repeater { model: root.draftFiles; delegate: T2 { text: modelData.split("/").pop() + "   " + modelData } }
-                            RowLayout { LogosButton { text: "Add files..."; onClicked: fileDlg.open() }
-                                        LogosButton { visible: root.draftFiles.length > 0; text: "Clear"; onClicked: root.draftFiles = [] } }
+                            RowLayout { SwampButton { text: "Add files..."; onClicked: fileDlg.open() }
+                                        SwampButton { visible: root.draftFiles.length > 0; text: "Clear"; onClicked: root.draftFiles = [] } }
                             Field { id: pPath; placeholderText: "...or paste a file path and press Enter"; onAccepted: { if (text) { var a = root.draftFiles.slice(); a.push(text); root.draftFiles = a; text = "" } } }
                         }
                         T3 { text: "Photos" }
                         ColumnLayout { Layout.fillWidth: true
                             Repeater { model: root.draftImages; delegate: T2 { text: modelData } }
-                            RowLayout { LogosButton { text: "Add photos..."; onClicked: imgDlg.open() }
-                                        LogosButton { visible: root.draftImages.length > 0; text: "Clear"; onClicked: root.draftImages = [] } }
+                            RowLayout { SwampButton { text: "Add photos..."; onClicked: imgDlg.open() }
+                                        SwampButton { visible: root.draftImages.length > 0; text: "Clear"; onClicked: root.draftImages = [] } }
                         }
                     }
                     RowLayout {
-                        LogosButton {
+                        SwampButton {
+                            primary: true
                             text: root.publishing ? "Publishing..." : "Publish"
                             enabled: !root.publishing   // one click, one model
                             onClicked: {
@@ -654,7 +769,7 @@ Item {
                                 }, function () { root.publishing = false })
                             }
                         }
-                        LogosButton { visible: !!root.draftFor || root.draftParents.length > 0; text: "Cancel"; onClicked: root.leaveDraft() }
+                        SwampButton { visible: !!root.draftFor || root.draftParents.length > 0; text: "Cancel"; onClicked: root.leaveDraft() }
                     }
                 }
 
@@ -669,11 +784,11 @@ Item {
                         RowLayout { Layout.fillWidth: true
                             Field { id: profName; objectName: "profName"; placeholderText: "display name"; saved: root.st.me && root.st.me.profile ? (root.st.me.profile.name || "") : "" }
                             Field { id: profBio; placeholderText: "a line about you (optional)"; saved: root.st.me && root.st.me.profile ? (root.st.me.profile.bio || "") : "" }
-                            LogosButton { text: "Save"; onClicked: root.act("setProfile", [JSON.stringify({ name: profName.text, bio: profBio.text })], "Profile saved", function () { profName.edited = false; profBio.edited = false }) } }
+                            SwampButton { text: "Save"; onClicked: root.act("setProfile", [JSON.stringify({ name: profName.text, bio: profBio.text })], "Profile saved", function () { profName.edited = false; profBio.edited = false }) } }
                         RowLayout { Layout.fillWidth: true
                             T3 { text: "Your key:" }
                             Text { textFormat: Text.PlainText; Layout.fillWidth: true; elide: Text.ElideMiddle; color: root.cText2; font.family: "monospace"; font.pixelSize: 11; text: root.st.me ? root.st.me.address : "" }
-                            LogosButton { text: "Copy"; onClicked: root.copy(root.st.me.address, "Address") } }
+                            SwampButton { text: "Copy"; onClicked: root.copy(root.st.me.address, "Address") } }
                     }
                     Card {
                         T1 { text: "Categories you follow" }
@@ -695,8 +810,8 @@ Item {
                                             root.act("setCategories", [JSON.stringify(ids)], "")
                                         } } } } }
                         RowLayout { spacing: root.spS
-                            LogosButton { text: "Follow all"; onClicked: root.act("setCategories", [JSON.stringify(["all"])], "") }
-                            LogosButton { text: "Only mine"; onClicked: root.act("setCategories", [JSON.stringify([])], "") } }
+                            SwampButton { text: "Follow all"; onClicked: root.act("setCategories", [JSON.stringify(["all"])], "") }
+                            SwampButton { text: "Only mine"; onClicked: root.act("setCategories", [JSON.stringify([])], "") } }
                     }
                     Card {
                         T1 { text: "Slicer" }
@@ -721,8 +836,8 @@ Item {
                                    : (root.st.printer.stateError ? "Can't reach it: " + root.st.printer.stateError : "Checking...")
                              color: !!root.st.printer && !!root.st.printer.stateError ? root.cErr : root.cText3 }
                         RowLayout { spacing: root.spS
-                            LogosButton { text: root.st.discovering ? "Looking..." : "Find printers"; enabled: !root.st.discovering; onClicked: root.act("findPrinters", [], "") }
-                            LogosButton { visible: !!root.st.printer; text: "Check status"; onClicked: root.core("printerStatus", [], function () { root.refresh() }) }
+                            SwampButton { text: root.st.discovering ? "Looking..." : "Find printers"; enabled: !root.st.discovering; onClicked: root.act("findPrinters", [], "") }
+                            SwampButton { visible: !!root.st.printer; text: "Check status"; onClicked: root.core("printerStatus", [], function () { root.refresh() }) }
                         }
                         Repeater { model: root.st.discovered || []
                             delegate: RowLayout { spacing: root.spS
@@ -735,7 +850,7 @@ Item {
                             Field { id: pModel; placeholderText: "model: A1 or A1 mini"; saved: root.st.printer ? root.st.printer.model : "" }
                             Field { id: pName; placeholderText: "name (optional)" }
                             Field { id: pCode; placeholderText: root.st.printer && root.st.printer.hasAccessCode ? "access code (saved)" : "access code (on the printer's screen)"; echoMode: TextInput.Password }
-                            LogosButton { text: "Save printer"; onClicked: root.act("setPrinter", [JSON.stringify({ ip: pIp.text, serial: pSerial.text, model: pModel.text, name: pName.text, accessCode: pCode.text })], "Printer saved", function () { pCode.text = ""; pIp.edited = false; pSerial.edited = false; pModel.edited = false }) }
+                            SwampButton { text: "Save printer"; onClicked: root.act("setPrinter", [JSON.stringify({ ip: pIp.text, serial: pSerial.text, model: pModel.text, name: pName.text, accessCode: pCode.text })], "Printer saved", function () { pCode.text = ""; pIp.edited = false; pSerial.edited = false; pModel.edited = false }) }
                         }
                     }
                     Card {
@@ -761,8 +876,8 @@ Item {
                         T3 { Layout.fillWidth: true; text: root.st.counters ? ("since start: rx " + root.st.counters.rx + " / tx " + root.st.counters.tx + "  ·  uploaded " + root.st.counters.uploaded + "  ·  fetched " + root.st.counters.fetched + (root.st.counters.verifyFailed ? "  ·  rejected " + root.st.counters.verifyFailed + " bad files" : "")) : "" }
                         T3 { Layout.fillWidth: true; text: root.st.storage ? ("Storage: " + (root.st.storage.hostOwned ? "Basecamp's node" : "own node") + "  ·  downloads go to " + root.st.storage.downloads) : "" }
                         RowLayout {
-                            LogosButton { text: "Sync now"; onClicked: root.act("resync", [], "Asked peers for anything missing") }
-                            LogosButton { text: "Copy diagnostics"; onClicked: root.copy(JSON.stringify(root.st), "Diagnostics") } }
+                            SwampButton { text: "Sync now"; onClicked: root.act("resync", [], "Asked peers for anything missing") }
+                            SwampButton { text: "Copy diagnostics"; onClicked: root.copy(JSON.stringify(root.st), "Diagnostics") } }
                     }
                 }
             }
@@ -793,15 +908,15 @@ Item {
     Dialog {
         id: printConfirm
         modal: true; anchors.centerIn: parent; width: 520; padding: root.sp
-        background: Rectangle { color: root.cCard; radius: root.rad + 4; border.color: root.cLine }
+        background: Rectangle { color: root.cCard; radius: root.radCard; border.color: root.cPrimary; border.width: 2 }
         header: T1 { text: "Start the print?"; padding: root.sp; bottomPadding: 0 }
         ColumnLayout { anchors.fill: parent; spacing: root.spS
             T2 { Layout.fillWidth: true; text: "The printer starts heating and printing right away. Check that PLA is loaded, the plate is clean and nothing is on the bed." +
                  (root.st.printJob && root.st.printJob.estimate ? "\n\nAbout " + root.st.printJob.estimate.time + ", " + (root.st.printJob.estimate.filamentG || "?") + " g of PLA." : "") } }
         footer: RowLayout { spacing: root.spS
             Item { Layout.fillWidth: true }
-            LogosButton { text: "Not yet"; onClicked: printConfirm.reject() }
-            LogosButton { text: "Print it"; onClicked: printConfirm.accept() }
+            SwampButton { text: "Not yet"; onClicked: printConfirm.reject() }
+            SwampButton { text: "Print it"; onClicked: printConfirm.accept() }
             Item { width: root.sp } }
         onAccepted: root.act("startPrint", ["yes"], "Sending to the printer...")
     }
@@ -809,12 +924,12 @@ Item {
         id: retractDlg
         title: "Retract this model?"
         modal: true; anchors.centerIn: parent; width: 520; padding: root.sp
-        background: Rectangle { color: root.cCard; radius: root.rad + 4; border.color: root.cLine }
+        background: Rectangle { color: root.cCard; radius: root.radCard; border.color: root.cPrimary; border.width: 2 }
         header: T1 { text: "Retract this model?"; padding: root.sp; bottomPadding: 0 }
         footer: RowLayout { spacing: root.spS
             Item { Layout.fillWidth: true }
-            LogosButton { text: "Cancel"; onClicked: retractDlg.reject() }
-            LogosButton { text: "Retract"; onClicked: retractDlg.accept() }
+            SwampButton { text: "Cancel"; onClicked: retractDlg.reject() }
+            SwampButton { text: "Retract"; onClicked: retractDlg.accept() }
             Item { width: root.sp } }
         ColumnLayout { anchors.fill: parent; spacing: root.spS
             T2 { Layout.fillWidth: true; text: "It disappears from listings everywhere it syncs. Copies people already downloaded stay theirs, and anyone looking at the model sees that you retracted it." }

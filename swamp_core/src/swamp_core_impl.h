@@ -89,6 +89,7 @@ private:
     void saveJobs();
     std::string blobPath(const std::string& sha) const;
     bool haveBlob(const std::string& sha) const;
+    bool wantedByJob(const std::string& sha);
     std::string storeBlob(const std::string& bytes);
 
     // catalogue
