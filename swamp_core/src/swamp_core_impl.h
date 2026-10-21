@@ -55,6 +55,12 @@ public:
     std::string globalSearch(std::string queryJson);
     // download (if needed) and open the version's model files in the installed desktop slicer
     std::string openInSlicer(std::string modelId, std::string version);
+    // opens the folder a finished download of this version went to, in the desktop's file manager
+    std::string openFolder(std::string modelId, std::string version);
+    // the slicers found on this computer and the one "Open in slicer" uses
+    std::string listSlicers();
+    // pick one: a program path (any slicer or AppImage), or "" to go back to the first one found
+    std::string setSlicer(std::string program);
 
     // printing on a Bambu Lab printer over the LAN (LAN-only + Developer Mode; no cloud)
     // listen for printers on the LAN (~6 s; ask again for the result)
@@ -90,6 +96,7 @@ private:
     std::string blobPath(const std::string& sha) const;
     bool haveBlob(const std::string& sha) const;
     bool wantedByJob(const std::string& sha);
+    std::string downloadState(const std::string& modelId);   // "done" / "downloading" / ""
     std::string storeBlob(const std::string& bytes);
 
     // catalogue
@@ -140,6 +147,7 @@ private:
     std::vector<swamp::json> detectSlicers(bool bambuOnly);
     std::vector<swamp::json> m_bambuSlicers;
     swamp::json m_slicer;
+    std::string m_slicerPick;                         // a program the user chose (settings.json "slicer")
     long long m_slicerAt = 0;
     // hub: files being pulled into our Storage node (see hubSweep)
     struct HubPull { enum Stage { Fetch, Wait, Write } stage = Fetch; std::string cid, session; long long size = 0, nextAt = 0, since = 0; int tries = 0; };

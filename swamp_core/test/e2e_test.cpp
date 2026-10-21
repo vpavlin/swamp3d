@@ -108,6 +108,27 @@ int main(int argc, char** argv) {
     std::string a, b;
     { std::ifstream f1(stl1, std::ios::binary), f2(dir + "/torus.stl", std::ios::binary); std::stringstream s1, s2; s1 << f1.rdbuf(); s2 << f2.rdbuf(); a = s1.str(); b = s2.str(); }
     CHECK(!a.empty() && a == b, "downloaded file is byte-identical to the original");
+    {
+        json dl = json::parse(bob->core.listModels(json{{"downloaded", true}}.dump()));
+        CHECK(dl["total"] == 1 && dl["models"][0]["modelId"] == mid && dl["models"][0]["downloaded"] == "done", "My models > Downloaded lists what bob downloaded (" + dl.dump().substr(0, 200) + ")");
+        json all = json::parse(bob->core.listModels("{}"));
+        bool flagged = false; for (const auto& c : all["models"]) if (c["modelId"] == mid) flagged = c["downloaded"] == "done";
+        CHECK(flagged, "...and Browse marks the card as downloaded");
+        CHECK(json::parse(alice->core.listModels(json{{"downloaded", true}}.dump()))["total"] == 0, "...alice downloaded nothing");
+        json of = json::parse(alice->core.openFolder(mid, "1"));
+        CHECK(!of.value("ok", true) && of.value("error", "").find("Download") != std::string::npos, "Open folder refuses a version that isn't downloaded (" + of.dump() + ")");
+        // the slicer "Open in slicer" uses: picked by path, e.g. a Bambu Studio AppImage
+        std::string img = root + "/Bambu_Studio_ubuntu-24.04_test.AppImage";
+        { std::ofstream f(img); f << "#!/bin/sh\n"; }
+        json bad = json::parse(bob->core.setSlicer(img));
+        CHECK(!bad.value("ok", true) && bad.value("error", "").find("executable") != std::string::npos, "a slicer file that isn't executable is refused (" + bad.dump() + ")");
+        fs::permissions(img, fs::perms::owner_all);
+        json good = json::parse(bob->core.setSlicer(img));
+        CHECK(good.value("ok", false) && good.value("currentName", "") == "Bambu Studio (AppImage)", "...an executable one is used, named from the file (" + good.dump() + ")");
+        json ls = json::parse(bob->core.listSlicers());
+        CHECK(ls.value("currentName", "") == "Bambu Studio (AppImage)" && !ls.value("auto", true), "...listSlicers reports the choice");
+        CHECK(json::parse(bob->core.setSlicer("")).value("ok", false) && json::parse(bob->core.listSlicers()).value("auto", false), "...and \"\" goes back to the first slicer found");
+    }
     CHECK(waitFor([&] { return bob->snap()["counters"].value("advertised", 0) >= 1; }, 4000),
           "bob announces the file only after it is whole and verified (downloads run with advertise=false)");
     alice->store.online = true; alice->bus.online = true;

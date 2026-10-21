@@ -35,6 +35,12 @@ Item {
     readonly property int radCard: 18
 
     property string tab: "browse"
+    property string mineView: "published"   // My models: what you published, or what you downloaded
+    property var slicers: []          // listSlicers(): what "Open in slicer" can use
+    property string slicerCur: ""
+    property bool slicerAuto: true
+    function loadSlicers() { root.core("listSlicers", [], function (raw) { var r = root.parse(raw); if (r && r.ok) { root.slicers = r.choices || []; root.slicerCur = r.current || ""; root.slicerAuto = !!r.auto } }) }
+    onTabChanged: if (tab === "me") loadSlicers()
     property var st: ({})
     property var models: []
     property var tags: []
@@ -106,7 +112,7 @@ Item {
         var pending = 2 + (root.openId ? 1 : 0) + (global ? 1 : 0)
         var fin = function () { if (--pending > 0) return; root.busy = false; if (root.again) { root.again = false; root.refresh() } }
         root.core("snapshot", [], function (raw) { var s = root.parse(raw); if (s && s.ok) root.st = s; fin() })
-        root.core("listModels", [JSON.stringify({ q: root.query, tag: root.tagFilter, category: root.catFilter, sort: root.sortBy, mine: root.tab === "mine", limit: 200 })], function (raw) {
+        root.core("listModels", [JSON.stringify({ q: root.query, tag: root.tagFilter, category: root.catFilter, sort: root.sortBy, mine: root.tab === "mine" && root.mineView === "published", downloaded: root.tab === "mine" && root.mineView === "downloaded", limit: 200 })], function (raw) {
             var r = root.parse(raw); if (r && r.ok) { root.models = r.models; root.tags = r.tags; root.total = r.total } fin()
         })
         if (global) root.core("globalSearch", [JSON.stringify({ q: root.query, category: root.catFilter, limit: 60 })], function (raw) {
@@ -357,7 +363,17 @@ Item {
         transform: Translate { y: hov.containsMouse ? -3 : 0; Behavior on y { NumberAnimation { duration: 120 } } }
         ColumnLayout {
             anchors.fill: parent; anchors.margins: root.spS; spacing: 4
-            Thumb { Layout.fillWidth: true; Layout.preferredHeight: 190; path: m.thumb || m.thumbSha || "" }
+            Thumb { Layout.fillWidth: true; Layout.preferredHeight: 190; path: m.thumb || m.thumbSha || ""
+                // downloaded (or on its way) to this computer
+                Rectangle {
+                    visible: !!m.downloaded
+                    anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 8
+                    width: dlt.implicitWidth + 16; height: 24; radius: 12
+                    color: m.downloaded === "done" ? root.cPrimary : root.cDuck
+                    Text { id: dlt; textFormat: Text.PlainText; anchors.centerIn: parent; color: root.cInk; font.pixelSize: 11; font.bold: true
+                        text: m.downloaded === "done" ? "\u2713 Downloaded" : "Downloading..." }
+                }
+            }
             T1 { Layout.fillWidth: true; text: m.title || ""; font.pixelSize: 14; elide: Text.ElideRight; maximumLineCount: 2 }
             T3 { Layout.fillWidth: true; text: "by " + m.creatorName + "  ·  " + root.catLabel(m.category) + "  ·  " + m.licence + (m.remix ? "  ·  remix" : "") + (m.retracted ? "  ·  retracted" : "") }
             T3 { Layout.fillWidth: true; text: root.plural(m.likes || 0, "like", "likes") + "  ·  " + root.plural(m.makes || 0, "make", "makes") + "  ·  v" + m.latest }
@@ -376,6 +392,8 @@ Item {
         onAccepted: { var a = root.draftFiles.slice(); for (var i = 0; i < selectedFiles.length; i++) a.push(root.pathOf(selectedFiles[i])); root.draftFiles = a } }
     FileDialog { id: imgDlg; fileMode: FileDialog.OpenFiles; title: "Photos (PNG, JPEG)"; currentFolder: StandardPaths.writableLocation(StandardPaths.PicturesLocation); nameFilters: ["Images (*.png *.jpg *.jpeg *.webp)"]
         onAccepted: { var a = root.draftImages.slice(); for (var i = 0; i < selectedFiles.length; i++) a.push(root.pathOf(selectedFiles[i])); root.draftImages = a } }
+    FileDialog { id: slicerDlg; fileMode: FileDialog.OpenFile; title: "Your slicer (an AppImage or program)"; currentFolder: StandardPaths.writableLocation(StandardPaths.HomeLocation)
+        onAccepted: root.act("setSlicer", [root.pathOf(selectedFile)], "Slicer set", function () { root.loadSlicers() }) }
     FileDialog { id: makeDlg; fileMode: FileDialog.OpenFile; title: "A photo of your print"; currentFolder: StandardPaths.writableLocation(StandardPaths.PicturesLocation); nameFilters: ["Images (*.png *.jpg *.jpeg *.webp)"]
         onAccepted: makePhoto.text = root.pathOf(selectedFile) }
 
@@ -508,7 +526,20 @@ Item {
                             }
                         }
                     }
-                    T3 { text: root.total + (root.total === 1 ? " model" : " models") + (root.tab === "mine" ? " published by you" : " in your catalogue") + (root.tagFilter ? " tagged " + root.tagFilter : "") }
+                    Row {
+                        visible: root.tab === "mine"; spacing: 6
+                        Repeater {
+                            model: [["published", "Published by me"], ["downloaded", "Downloaded"]]
+                            delegate: Rectangle {
+                                readonly property bool on: root.mineView === modelData[0]
+                                width: mvt.implicitWidth + 24; height: 30; radius: 15
+                                color: on ? root.cPrimary : root.cInset; border.color: on ? root.cPrimary : root.cLine
+                                Text { id: mvt; textFormat: Text.PlainText; anchors.centerIn: parent; text: modelData[1]; color: on ? root.cInk : root.cText; font.pixelSize: 13; font.bold: on }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.mineView = modelData[0]; root.refresh() } }
+                            }
+                        }
+                    }
+                    T3 { text: root.total + (root.total === 1 ? " model" : " models") + (root.tab !== "mine" ? " in your catalogue" : root.mineView === "downloaded" ? " downloaded" : " published by you") + (root.tagFilter ? " tagged " + root.tagFilter : "") }
                     GridLayout {
                         Layout.fillWidth: true
                         columns: Math.max(1, Math.floor(scroller.availableWidth / 250))
@@ -518,7 +549,7 @@ Item {
                             delegate: ModelCard { m: modelData }
                         }
                     }
-                    T2 { visible: root.models.length === 0 && !root.query; text: root.tab === "mine" ? "You haven't published anything yet. Publish your first model." : "Nothing here yet. The catalogue fills in as it syncs from other people, or publish the first model." }
+                    T2 { visible: root.models.length === 0 && !root.query; text: root.tab === "mine" ? (root.mineView === "downloaded" ? "Nothing downloaded yet. Open a model and press Download." : "You haven't published anything yet. Publish your first model.") : "Nothing here yet. The catalogue fills in as it syncs from other people, or publish the first model." }
                     T2 { visible: root.models.length === 0 && !!root.query && root.tab === "browse"; text: "Nothing in the categories you follow." }
                     // everything else, from the newest index snapshot (ADR 0015)
                     ColumnLayout {
@@ -596,7 +627,8 @@ Item {
                                     SwampButton { primary: true; Layout.preferredWidth: 140; text: { var d = root.ver() && root.ver().download; return d ? (d.status === "done" ? "Download again" : d.status === "failed" ? "Retry download" : "Downloading...") : "Download" }
                                         onClicked: root.act("download", [root.model.modelId, String(root.ver().v)], "Downloading into your Swamp folder") }
                                     SwampButton { Layout.preferredWidth: 110; enabled: !!(root.ver() && root.ver().download && root.ver().download.status === "done"); text: "Open folder"
-                                        onClicked: Qt.openUrlExternally(root.fileUrl(root.ver().download.dir)) }
+                                        // the core opens it: Basecamp 0.3 views can't open local paths themselves
+                                        onClicked: root.act("openFolder", [root.model.modelId, String(root.ver().v)], "") }
                                     // hand the verified model files to the slicer you already use; print from there
                                     SwampButton { Layout.preferredWidth: 170
                                         enabled: !!root.st.slicer
@@ -816,6 +848,15 @@ Item {
                         T1 { text: "Slicer" }
                         T2 { Layout.fillWidth: true; text: "\"Open in slicer\" on a model page downloads its files (checked against their hashes) and opens them in your slicer, where you check the preview and print the way you always do." }
                         T2 { Layout.fillWidth: true; visible: !!root.st.slicer; color: root.cOk; text: root.st.slicer ? "Opens in " + root.st.slicer.name + "." : "" }
+                        // which slicer: any found on this computer, or a program you point at (e.g. a Bambu Studio AppImage)
+                        RowLayout { spacing: root.spS
+                            T3 { text: root.slicers.length > 0 ? "Use" : "Your slicer is somewhere else?" }
+                            SwampCombo { id: slicerBox; Layout.preferredWidth: 340; visible: root.slicers.length > 0
+                                model: ["First one found"].concat(root.slicers.map(function (c) { return c.name + "  -  " + c.program }))
+                                currentIndex: { if (root.slicerAuto) return 0; for (var i = 0; i < root.slicers.length; i++) if (root.slicers[i].key === root.slicerCur) return i + 1; return 0 }
+                                onActivated: root.act("setSlicer", [currentIndex === 0 ? "" : root.slicers[currentIndex - 1].key], "", function () { root.loadSlicers() }) }
+                            SwampButton { text: "Other program..."; onClicked: slicerDlg.open() }
+                        }
                         FixPanel { fix: root.st.slicer ? null : (root.st.printSlicerFix || null) }
                     }
                     Card {

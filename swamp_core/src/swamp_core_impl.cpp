@@ -14,6 +14,8 @@
 #include <QStandardPaths>
 #include <QSysInfo>
 #include <QDir>
+#include <QUrl>
+#include <QProcessEnvironment>
 #include <QObject>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -29,7 +31,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.13";
+static const char* SWAMP_VERSION = "0.5.14";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
@@ -219,12 +221,13 @@ void SwampCoreImpl::loadSettings() {
         for (size_t i = 0; !all && i <= e.size();) { size_t j = e.find(',', i); if (j == std::string::npos) j = e.size(); if (j > i) want.push_back(e.substr(i, j - i)); i = j + 1; }
     }
     if (m_hub) all = true;
+    m_slicerPick = st.is_object() ? str(st, "slicer") : "";
     for (const auto& [id, label] : categories()) if (all || std::find(want.begin(), want.end(), id) != want.end()) m_subs.insert(id);
 }
 void SwampCoreImpl::saveSettings() {
     json c = json::array();
     for (const auto& id : m_subs) c.push_back(id);
-    writeFile(m_dataDir + "/settings.json", json{{"categories", c}}.dump());
+    writeFile(m_dataDir + "/settings.json", json{{"categories", c}, {"slicer", m_slicerPick}}.dump());
 }
 json SwampCoreImpl::omissionsJson() {
     json a = json::array();
@@ -390,7 +393,18 @@ json SwampCoreImpl::card(const Model& m) {
                 {"published", v.value("published", 0LL)}, {"created", m.created}, {"thumb", thumb},
                 {"mine", m.creator == m_id.address}, {"retracted", m.retracted},
                 {"remix", v.contains("parents") && !v["parents"].empty()},
-                {"thumbSha", thumbSha}, {"category", m.category}};
+                {"thumbSha", thumbSha}, {"category", m.category}, {"downloaded", downloadState(m.modelId)}};
+}
+
+// Any version of the model downloaded (or on its way): what the cards and the Downloaded list show.
+std::string SwampCoreImpl::downloadState(const std::string& modelId) {
+    std::string st;
+    for (const auto& [key, j] : m_jobs) {
+        if (j.modelId != modelId) continue;
+        if (j.status == "done") return "done";
+        if (j.status != "failed") st = "downloading";
+    }
+    return st;
 }
 
 // ---- transport ------------------------------------------------------------------------------
@@ -1221,7 +1235,60 @@ json SwampCoreImpl::findSlicer() {
     m_bambuSlicers = detectSlicers(true);
     return m_slicer;
 }
-json SwampCoreImpl::detectSlicer() { auto all = detectSlicers(false); return all.empty() ? json() : all[0]; }
+static std::string slicerNameOf(const std::string& program) {
+    std::string low = fs::path(program).filename().string();
+    for (auto& c : low) c = (char)std::tolower((unsigned char)c);
+    std::string kind = low.find("bambu") != std::string::npos ? "Bambu Studio" : low.find("orca") != std::string::npos ? "OrcaSlicer"
+                     : low.find("prusa") != std::string::npos ? "PrusaSlicer" : low.find("super") != std::string::npos ? "SuperSlicer" : fs::path(program).filename().string();
+    return low.size() > 9 && low.compare(low.size() - 9, 9, ".appimage") == 0 ? kind + " (AppImage)" : kind;
+}
+static bool runnable(const std::string& p) {
+    std::error_code ec;
+    return fs::is_regular_file(p, ec) && access(p.c_str(), X_OK) == 0;
+}
+// The chosen slicer if it's still there, else the first one found.
+json SwampCoreImpl::detectSlicer() {
+    if (!m_slicerPick.empty()) {
+        auto all = detectSlicers(false);
+        for (const auto& j : all) if (str(j, "program") + (j["args"].empty() ? "" : " " + j["args"].dump()) == m_slicerPick) return j;
+        if (runnable(m_slicerPick)) return json{{"name", slicerNameOf(m_slicerPick)}, {"program", m_slicerPick}, {"args", json::array()}, {"picked", true}};
+    }
+    auto all = detectSlicers(false);
+    return all.empty() ? json() : all[0];
+}
+static std::string slicerKey(const json& j) { return str(j, "program") + (j["args"].empty() ? "" : " " + j["args"].dump()); }
+
+std::string SwampCoreImpl::listSlicers() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    m_slicerAt = 0;
+    json cur = findSlicer();
+    json choices = json::array();
+    for (auto j : detectSlicers(false)) { j["key"] = slicerKey(j); choices.push_back(j); }
+    if (cur.is_object() && cur.value("picked", false)) { json c = cur; c["key"] = m_slicerPick; choices.push_back(c); }
+    return ok(json{{"current", cur.is_object() ? json(slicerKey(cur)) : json(nullptr)}, {"currentName", cur.is_object() ? str(cur, "name") : ""},
+                   {"auto", m_slicerPick.empty()}, {"choices", choices}});
+}
+
+std::string SwampCoreImpl::setSlicer(std::string program) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    program = unquote(program);
+    if (program.rfind("file://", 0) == 0) program = QUrl(QString::fromStdString(program)).toLocalFile().toStdString();
+    bool known = false;
+    for (const auto& j : detectSlicers(false)) known = known || slicerKey(j) == program;
+    if (!program.empty() && !known) {
+        if (!runnable(program)) {
+            std::error_code ec;
+            if (fs::is_regular_file(program, ec)) return fail("That file isn't executable. Make it executable (chmod +x) and pick it again.");
+            return fail("No program at " + program);
+        }
+    }
+    m_slicerPick = program;
+    saveSettings();
+    m_slicerAt = 0;
+    json cur = findSlicer();
+    publishState();
+    return ok(json{{"currentName", cur.is_object() ? str(cur, "name") : ""}});
+}
 
 // Every slicer installed, best first; bambuOnly = the ones that can slice for a Bambu Lab printer
 // (OrcaSlicer, Bambu Studio). Printing must not stop at "the first slicer found" - with PrusaSlicer
@@ -1272,6 +1339,27 @@ std::vector<json> SwampCoreImpl::detectSlicers(bool bambuOnly) {
     return out;
 }
 
+// Start a desktop program detached, without Basecamp's AppImage environment: its LD_LIBRARY_PATH
+// and Qt paths point at the libraries bundled in the AppImage, which a slicer or file manager would
+// load instead of its own.
+static bool startDesktopProgram(const QString& program, const QStringList& args, const QString& dir) {
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    QString appdir = env.value("APPDIR");
+    for (const char* k : {"LD_LIBRARY_PATH", "LD_PRELOAD", "QT_PLUGIN_PATH", "QML2_IMPORT_PATH", "QML_IMPORT_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH",
+                          "QTWEBENGINEPROCESS_PATH", "QTWEBENGINE_RESOURCES_PATH", "QT_QPA_PLATFORM", "APPDIR", "APPIMAGE", "ARGV0", "OWD", "PYTHONHOME", "PYTHONPATH", "GDK_PIXBUF_MODULE_FILE", "GIO_MODULE_DIR"})
+        env.remove(k);
+    QStringList path;
+    for (const QString& d : env.value("PATH").split(':', Qt::SkipEmptyParts))
+        if (!(d.startsWith("/tmp/.mount_") || d.startsWith("/tmp/appimage_extracted") || (!appdir.isEmpty() && d.startsWith(appdir)))) path << d;
+    env.insert("PATH", path.join(':'));
+    QProcess p;
+    p.setProgram(program); p.setArguments(args); p.setProcessEnvironment(env);
+    if (!dir.isEmpty()) p.setWorkingDirectory(dir);
+    p.setStandardInputFile(QProcess::nullDevice()); p.setStandardOutputFile(QProcess::nullDevice()); p.setStandardErrorFile(QProcess::nullDevice());
+    qint64 pid = 0;
+    return p.startDetached(&pid);
+}
+
 std::string SwampCoreImpl::launchSlicer(const DownloadJob& j) {
     json sl = findSlicer();
     if (sl.is_null()) return "No slicer found - install OrcaSlicer, Bambu Studio or PrusaSlicer, or set SWAMP_SLICER";
@@ -1280,8 +1368,7 @@ std::string SwampCoreImpl::launchSlicer(const DownloadJob& j) {
     int n = 0;
     for (const auto& [sha, name] : j.files) if (isMeshFile(name)) { args << QString::fromStdString(j.dir + "/" + name); n++; }
     if (n == 0) return "This version has no model files a slicer can open";
-    qint64 pid = 0;
-    bool started = QProcess::startDetached(QString::fromStdString(sl["program"].get<std::string>()), args, QString::fromStdString(j.dir), &pid);
+    bool started = startDesktopProgram(QString::fromStdString(sl["program"].get<std::string>()), args, QString::fromStdString(j.dir));
     fprintf(stderr, "[swamp] slicer: %s %s (%d files) -> %s\n", str(sl, "name").c_str(), str(sl, "program").c_str(), n, started ? "started" : "FAILED");
     if (!started) return "Couldn't start " + str(sl, "name");
     m_slicerLaunches++;
@@ -1571,14 +1658,16 @@ std::string SwampCoreImpl::listModels(std::string queryJson) {
     if (!q.is_object()) q = json::object();
     std::string catFilter = str(q, "category");
     std::string text = str(q, "q"), tag = str(q, "tag"), sort = (str(q, "sort").empty() ? std::string("new") : str(q, "sort"));
-    bool mineOnly = flag(q, "mine");
+    bool mineOnly = flag(q, "mine"), downloadedOnly = flag(q, "downloaded");
     size_t limit = (size_t)std::max(1, std::min(500, (int)std::max(-1000LL, std::min(1000LL, num(q, "limit", 100)))));
     std::vector<const Model*> hits;
     for (const auto& [id, m] : m_cat.models) {
         if (m.versions.empty()) continue;
         if (mineOnly && m.creator != m_id.address) continue;
-        if (m.retracted && !mineOnly) continue;   // your own retracted models stay visible to you
-        if (!mineOnly && m.creator != m_id.address && !m_subs.count(m.category)) continue;   // opened from search, not followed
+        // what you downloaded stays listed there, whichever categories you follow
+        if (downloadedOnly && downloadState(id).empty()) continue;
+        if (m.retracted && !mineOnly && !downloadedOnly) continue;   // your own retracted models stay visible to you
+        if (!mineOnly && !downloadedOnly && m.creator != m_id.address && !m_subs.count(m.category)) continue;   // opened from search, not followed
         if (!catFilter.empty() && m.category != catFilter) continue;
         if (matches(m, text, tag)) hits.push_back(&m);
     }
@@ -2522,6 +2611,24 @@ std::string SwampCoreImpl::download(std::string modelId, std::string version) {
     saveJobs();
     advanceJobs();
     return ok(json{{"dir", j.dir}});
+}
+
+std::string SwampCoreImpl::openFolder(std::string modelId, std::string version) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    modelId = unquote(modelId);
+    auto jt = m_jobs.find(modelId + "@" + std::to_string(atoi(unquote(version).c_str())));
+    if (jt == m_jobs.end() || jt->second.status != "done") return fail("Download this version first");
+    std::error_code ec;
+    if (!fs::is_directory(jt->second.dir, ec)) return fail("The folder is gone: " + jt->second.dir);
+    // the view can't open local paths in Basecamp 0.3 (views are sandboxed); the core runs as the user
+    QString dir = QString::fromStdString(jt->second.dir);
+    bool started = false;
+    std::string how;
+    if (QString x = QStandardPaths::findExecutable("xdg-open"); !x.isEmpty()) { started = startDesktopProgram(x, {dir}, dir); how = "xdg-open"; }
+    if (!started) if (QString g = QStandardPaths::findExecutable("gio"); !g.isEmpty()) { started = startDesktopProgram(g, {"open", dir}, dir); how = "gio open"; }
+    fprintf(stderr, "[swamp] open folder %s (%s) -> %s\n", jt->second.dir.c_str(), how.empty() ? "no opener" : how.c_str(), started ? "started" : "FAILED");
+    if (!started) return fail("No file manager to open it with (needs xdg-open). The files are in " + jt->second.dir);
+    return ok(json{{"dir", jt->second.dir}});
 }
 
 std::string SwampCoreImpl::comment(std::string modelId, std::string text) {
