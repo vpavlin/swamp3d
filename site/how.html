@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Swamp works · diagrams</title>
+<style>
+  :root { --mud:#0d1610; --mud2:#132017; --moss:#1c2e20; --reed:#2b4630; --slime:#8fd14f; --slime2:#b8f26b;
+          --duck:#e8c547; --beak:#f08a24; --ink:#10200c; --text:#dfe9d6; --text2:#9fb595; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--mud); color: var(--text); font: 18px/1.5 system-ui, sans-serif; }
+  header { background: var(--slime); color: var(--ink); padding: 22px 40px; display: flex; align-items: center; gap: 18px; }
+  header h1 { margin: 0; font-size: 30px; }
+  header p { margin: 0; font-size: 16px; }
+  nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 40px; background: var(--mud2); position: sticky; top: 0; z-index: 2; }
+  nav a { color: var(--slime2); text-decoration: none; border: 1px solid var(--reed); border-radius: 16px; padding: 4px 14px; font-size: 15px; }
+  nav a:hover { background: var(--moss); }
+  section { max-width: 1280px; margin: 0 auto; padding: 36px 40px 20px; }
+  h2 { font-size: 28px; margin: 0 0 6px; color: var(--slime2); }
+  .say { font-size: 19px; color: var(--text); max-width: 1050px; }
+  .say b { color: var(--duck); }
+  .card { background: var(--moss); border: 1px solid var(--reed); border-radius: 18px; padding: 18px; margin: 16px 0; }
+  svg { width: 100%; height: auto; display: block; }
+  .tag { display: inline-block; font-size: 13px; font-weight: 700; border-radius: 10px; padding: 2px 10px; margin-left: 8px; vertical-align: middle; }
+  .built { background: var(--slime); color: var(--ink); } .partial { background: var(--duck); color: var(--ink); } .planned { background: var(--beak); color: var(--ink); }
+  table { border-collapse: collapse; width: 100%; font-size: 17px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--reed); vertical-align: top; }
+  th { color: var(--text2); font-weight: 600; }
+  .yes { color: var(--slime2); font-weight: 700; } .no { color: var(--beak); font-weight: 700; } .meh { color: var(--duck); font-weight: 700; }
+  footer { color: var(--text2); font-size: 14px; padding: 30px 40px 50px; max-width: 1280px; margin: 0 auto; }
+  /* svg text */
+  .t  { fill: var(--text); font: 600 17px system-ui, sans-serif; }
+  .ts { fill: var(--text2); font: 14px system-ui, sans-serif; }
+  .tk { fill: var(--ink); font: 700 16px system-ui, sans-serif; }
+  .tw { fill: var(--beak); font: 600 14px system-ui, sans-serif; }
+  .box  { fill: var(--mud2); stroke: var(--reed); stroke-width: 2; }
+  .boxs { fill: var(--slime); }
+  .boxd { fill: var(--duck); }
+  .boxw { fill: none; stroke: var(--beak); stroke-width: 2; stroke-dasharray: 7 5; }
+  .ln  { stroke: var(--slime); stroke-width: 3; fill: none; marker-end: url(#a); }
+  .lnd { stroke: var(--duck); stroke-width: 3; fill: none; marker-end: url(#ad); }
+  .lnw { stroke: var(--beak); stroke-width: 3; fill: none; stroke-dasharray: 8 6; marker-end: url(#aw); }
+  .lnq { stroke: var(--text2); stroke-width: 2; fill: none; stroke-dasharray: 4 5; marker-end: url(#aq); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <marker id="a"  viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8fd14f"/></marker>
+    <marker id="ad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e8c547"/></marker>
+    <marker id="aw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#f08a24"/></marker>
+    <marker id="aq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9fb595"/></marker>
+  </defs>
+</svg>
+
+<header>
+  <div>
+    <h1>How Swamp works</h1>
+    <p>A 3D-model library with no company in the middle, on the Logos stack. Diagrams for explaining it.</p>
+  </div>
+</header>
+<nav>
+  <a href="#big">1 · The big picture</a><a href="#publish">2 · Publishing</a><a href="#delivery">3 · Messaging</a>
+  <a href="#storage">4 · Storage &amp; hubs</a><a href="#index">5 · Search index</a><a href="#privacy">6 · Privacy</a><a href="#chain">7 · Blockchain plans</a>
+</nav>
+
+<!-- ======================================================= 1 -->
+<section id="big">
+  <h2>1 · The big picture <span class="tag built">built</span></h2>
+  <p class="say">Two Logos services do the work. <b>Messaging</b> carries small, signed <b>events</b>: "this model exists", "here's version 2", a like, a comment. <b>Storage</b> carries the <b>files</b>, addressed by their content. Your device keeps its own copy of the catalogue for the categories you follow. <b>Hubs</b> are just Swamp running on an always-on server: they keep copies so the network works when your laptop sleeps.</p>
+  <div class="card">
+  <svg viewBox="0 0 1200 520">
+    <!-- your device -->
+    <rect class="box" x="20" y="30" width="330" height="440" rx="18"/>
+    <text class="t" x="40" y="62">Your computer · Basecamp</text>
+    <rect class="boxs" x="45" y="85" width="280" height="56" rx="12"/><text class="tk" x="62" y="119">Swamp app (the window)</text>
+    <rect class="box" x="45" y="160" width="280" height="80" rx="12"/><text class="t" x="62" y="190">swamp_core</text>
+    <text class="ts" x="62" y="214">your catalogue copy, signing,</text><text class="ts" x="62" y="232">hash checks, downloads</text>
+    <rect class="box" x="45" y="258" width="280" height="56" rx="12"/><text class="t" x="62" y="292">loam_core → Messaging node</text>
+    <rect class="box" x="45" y="332" width="280" height="56" rx="12"/><text class="t" x="62" y="366">Storage node</text>
+    <text class="ts" x="45" y="420">Your key = your identity.</text><text class="ts" x="45" y="442">No account, no server login.</text>
+    <!-- networks -->
+    <rect class="box" x="450" y="70" width="300" height="140" rx="70"/>
+    <text class="t" x="520" y="125">Logos Messaging</text><text class="ts" x="490" y="152">signed events, one topic</text><text class="ts" x="490" y="172">per category</text>
+    <rect class="box" x="450" y="300" width="300" height="140" rx="70"/>
+    <text class="t" x="530" y="355">Logos Storage</text><text class="ts" x="490" y="382">files by content ID (CID),</text><text class="ts" x="490" y="402">found via a DHT</text>
+    <path class="ln" d="M325 286 C390 286 400 160 448 150"/>
+    <path class="ln" d="M325 360 C390 360 400 380 448 375"/>
+    <!-- hub -->
+    <rect class="boxd" x="850" y="150" width="320" height="200" rx="18"/>
+    <text class="tk" x="872" y="185">Hub (always on)</text>
+    <text class="tk" x="872" y="218" style="font-weight:500">· same Swamp, headless</text>
+    <text class="tk" x="872" y="244" style="font-weight:500">· follows every category</text>
+    <text class="tk" x="872" y="270" style="font-weight:500">· keeps a copy of every file</text>
+    <text class="tk" x="872" y="296" style="font-weight:500">· publishes the search index</text>
+    <text class="tk" x="872" y="322" style="font-weight:500">· anyone can run one</text>
+    <path class="lnd" d="M752 140 C800 140 810 200 848 210"/>
+    <path class="lnd" d="M752 370 C800 370 810 300 848 290"/>
+    <!-- other people -->
+    <rect class="box" x="850" y="400" width="320" height="80" rx="14"/>
+    <text class="t" x="872" y="432">Other people's Swamp</text><text class="ts" x="872" y="456">same app, same rules, no special roles</text>
+    <path class="lnq" d="M735 192 C790 250 800 430 846 440"/>
+  </svg>
+  </div>
+</section>
+
+<!-- ======================================================= 2 -->
+<section id="publish">
+  <h2>2 · What happens when you publish <span class="tag built">built</span></h2>
+  <p class="say">Your app does the heavy lifting locally: it <b>hashes</b> every file, renders a <b>thumbnail</b> and takes a <b>shape fingerprint</b> (for spotting copies later). The listing goes out over Messaging at once; the files upload to Storage in the background. A hub sees the new model, <b>pulls a copy</b> while your computer is online, and from then on serves it to everyone.</p>
+  <div class="card">
+  <svg viewBox="0 0 1200 430">
+    <g>
+      <rect class="boxs" x="20"  y="40" width="200" height="90" rx="14"/><text class="tk" x="40" y="75">1 · Your files</text><text class="tk" x="40" y="102" style="font-weight:500">STL / 3MF + photos</text>
+      <rect class="box"  x="270" y="40" width="230" height="90" rx="14"/><text class="t" x="290" y="75">2 · Prepare locally</text><text class="ts" x="290" y="100">SHA-256 · thumbnail ·</text><text class="ts" x="290" y="118">shape fingerprint</text>
+      <rect class="box"  x="550" y="40" width="270" height="90" rx="14"/><text class="t" x="570" y="75">3 · Signed events</text><text class="ts" x="570" y="100">model.create · model.version</text><text class="ts" x="570" y="118">(title, tags, file hashes)</text>
+      <rect class="box"  x="870" y="40" width="310" height="90" rx="14"/><text class="t" x="890" y="75">4 · Messaging</text><text class="ts" x="890" y="100">to the category topic, e.g.</text><text class="ts" x="890" y="118">/swamp/1/cat/household</text>
+      <path class="ln" d="M220 85 L268 85"/><path class="ln" d="M500 85 L548 85"/><path class="ln" d="M820 85 L868 85"/>
+    </g>
+    <g>
+      <rect class="box"  x="270" y="200" width="230" height="90" rx="14"/><text class="t" x="290" y="235">5 · Upload to Storage</text><text class="ts" x="290" y="260">in the background,</text><text class="ts" x="290" y="278">returns a CID per file</text>
+      <rect class="box"  x="550" y="200" width="270" height="90" rx="14"/><text class="t" x="570" y="235">6 · blob.cids event</text><text class="ts" x="570" y="260">"file with hash X is at CID Y"</text>
+      <rect class="boxd" x="870" y="200" width="310" height="90" rx="14"/><text class="tk" x="890" y="235">7 · Hub pulls a copy</text><text class="tk" x="890" y="262" style="font-weight:500">checks the hash, keeps it,</text><text class="tk" x="890" y="282" style="font-weight:500">announces itself as holder</text>
+      <path class="ln" d="M385 130 L385 198"/><path class="ln" d="M500 245 L548 245"/><path class="ln" d="M820 245 L868 245"/>
+    </g>
+    <rect class="box" x="20" y="330" width="1160" height="80" rx="14"/>
+    <text class="t" x="40" y="362">Two ids per file: <tspan class="ts">the SHA-256 (known at once, goes in the signed event) and the Storage CID (known after upload).</tspan></text>
+    <text class="ts" x="40" y="390">Whoever downloads checks the bytes against the SHA-256 — a hub or a stranger can't swap the file.</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ======================================================= 3 -->
+<section id="delivery">
+  <h2>3 · How we use Logos Messaging <span class="tag built">built</span></h2>
+  <p class="say">The catalogue is an <b>append-only log of signed events</b>, not a database. Each category is its own topic, so your node only follows what you care about and keeps a full copy of it: <b>browsing is local, works offline, and nobody sees what you look at</b>. When you come back online, your node compares what it has with its peers (a set-reconciliation catch-up) and fetches only the missing events. Every node checks every signature, and only a model's creator can add versions to it.</p>
+  <div class="card">
+  <svg viewBox="0 0 1200 470">
+    <!-- topics -->
+    <text class="t" x="30" y="40">Topics (one per category, ~30 of them)</text>
+    <rect class="boxs" x="30"  y="60" width="200" height="46" rx="23"/><text class="tk" x="58" y="90">/cat/household</text>
+    <rect class="boxs" x="245" y="60" width="160" height="46" rx="23"/><text class="tk" x="275" y="90">/cat/tools</text>
+    <rect class="box"  x="420" y="60" width="150" height="46" rx="23"/><text class="t" x="452" y="90">/cat/toys</text>
+    <rect class="box"  x="585" y="60" width="160" height="46" rx="23"/><text class="t" x="612" y="90">/cat/art …</text>
+    <rect class="box"  x="760" y="60" width="200" height="46" rx="23"/><text class="t" x="788" y="90">/people (profiles)</text>
+    <text class="ts" x="30" y="132">green = topics you follow: your node mirrors them completely</text>
+    <!-- log -->
+    <text class="t" x="30" y="185">Your catalogue = a log of signed events</text>
+    <g>
+      <rect class="box" x="30"  y="200" width="170" height="74" rx="10"/><text class="t" x="44" y="230">model.create</text><text class="ts" x="44" y="254">signed by creator</text>
+      <rect class="box" x="210" y="200" width="170" height="74" rx="10"/><text class="t" x="224" y="230">model.version</text><text class="ts" x="224" y="254">v1: files, tags</text>
+      <rect class="box" x="390" y="200" width="150" height="74" rx="10"/><text class="t" x="404" y="230">blob.cids</text><text class="ts" x="404" y="254">where files are</text>
+      <rect class="box" x="550" y="200" width="130" height="74" rx="10"/><text class="t" x="564" y="230">like</text><text class="ts" x="564" y="254">anyone</text>
+      <rect class="box" x="690" y="200" width="150" height="74" rx="10"/><text class="t" x="704" y="230">comment</text><text class="ts" x="704" y="254">anyone</text>
+      <rect class="box" x="850" y="200" width="170" height="74" rx="10"/><text class="t" x="864" y="230">model.version</text><text class="ts" x="864" y="254">v2: creator only</text>
+      <path class="ln" d="M1030 237 L1080 237"/><text class="ts" x="1088" y="243">…</text>
+    </g>
+    <text class="ts" x="30" y="300">Events are folded into the current state on your machine. Nothing is ever edited in place: a fix is a new version; a retraction is a signed event too.</text>
+    <!-- catch-up -->
+    <rect class="box" x="30" y="330" width="540" height="120" rx="14"/>
+    <text class="t" x="50" y="362">Catch-up after being offline</text>
+    <text class="ts" x="50" y="388">"I have these events" (a compact fingerprint)</text>
+    <text class="ts" x="50" y="410">→ peers answer with what you're missing, in rounds</text>
+    <text class="ts" x="50" y="432">→ any node that follows the topic can answer, hubs included</text>
+    <rect class="boxw" x="600" y="330" width="570" height="120" rx="14"/>
+    <text class="tw" x="620" y="362">Limits we live with</text>
+    <text class="ts" x="620" y="388">· the network rate-limits every node (RLN), so we batch and</text>
+    <text class="ts" x="620" y="410">  throttle answers; snapshots will replace long replays</text>
+    <text class="ts" x="620" y="432">· catch-up can still stall on a node with a flaky connection (being fixed)</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ======================================================= 4 -->
+<section id="storage">
+  <h2>4 · How we use Logos Storage, and why there are hubs <span class="tag built">built</span></h2>
+  <p class="say">Storage finds files by asking a DHT "who holds this CID?" and then connects to a holder directly. Most of us sit behind <b>home routers (NAT)</b>: nobody can connect <i>to</i> us. Two home computers can only reach each other through a <b>relay</b>, and relays are capped (about 128 KB and 2 minutes per connection), so big files between two homes stall. A <b>hub</b> is reachable, so the publisher's computer connects <i>out</i> to it, the hub pulls the file, and everyone else downloads from the hub.</p>
+  <div class="card">
+  <svg viewBox="0 0 1200 470">
+    <!-- without hub -->
+    <text class="t" x="30" y="40">Without a hub: home ↔ home</text>
+    <rect class="box" x="30" y="60" width="210" height="80" rx="14"/><text class="t" x="50" y="95">Publisher</text><text class="ts" x="50" y="118">behind a home router</text>
+    <rect class="box" x="390" y="60" width="160" height="80" rx="14"/><text class="t" x="420" y="95">Relay</text><text class="ts" x="410" y="118">128 KB / 2 min cap</text>
+    <rect class="box" x="700" y="60" width="210" height="80" rx="14"/><text class="t" x="720" y="95">Downloader</text><text class="ts" x="720" y="118">behind a home router</text>
+    <path class="lnw" d="M240 100 L388 100"/><path class="lnw" d="M550 100 L698 100"/>
+    <text class="tw" x="950" y="95">small pictures: minutes</text><text class="tw" x="950" y="118">big files: stall</text>
+    <!-- with hub -->
+    <text class="t" x="30" y="205">With a hub</text>
+    <rect class="box" x="30" y="225" width="210" height="80" rx="14"/><text class="t" x="50" y="260">Publisher</text><text class="ts" x="50" y="283">connects out to the hub</text>
+    <rect class="boxd" x="420" y="215" width="300" height="100" rx="16"/><text class="tk" x="440" y="250">Hub · public address</text><text class="tk" x="440" y="276" style="font-weight:500">pulls the file, checks the hash,</text><text class="tk" x="440" y="298" style="font-weight:500">keeps it, tells the DHT</text>
+    <rect class="box" x="900" y="225" width="270" height="80" rx="14"/><text class="t" x="920" y="260">Everyone else</text><text class="ts" x="920" y="283">download from the hub, direct</text>
+    <path class="lnd" d="M240 265 L418 265"/><path class="lnd" d="M720 265 L898 265"/>
+    <text class="ts" x="250" y="250">pull while you're online</text><text class="ts" x="740" y="250">seconds, not minutes</text>
+    <!-- facts -->
+    <rect class="box" x="30" y="350" width="560" height="100" rx="14"/>
+    <text class="t" x="50" y="382">Measured today</text>
+    <text class="ts" x="50" y="408">17 MB model: publisher → hub → laptop, with live progress</text>
+    <text class="ts" x="50" y="430">fresh node fetching from the hub: 71 KB in 6 s</text>
+    <rect class="boxw" x="610" y="350" width="560" height="100" rx="14"/>
+    <text class="tw" x="630" y="382">Honest limits</text>
+    <text class="ts" x="630" y="408">· a file must reach a hub while its publisher is online</text>
+    <text class="ts" x="630" y="430">· a new file takes a few minutes to become findable</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ======================================================= 5 -->
+<section id="index">
+  <h2>5 · Search: the index <span class="tag built">built</span></h2>
+  <p class="say">You can't search what you don't follow without asking somebody. Swamp's answer: <b>indexers</b> (hubs, or anyone with the full catalogue) publish a <b>signed, deterministic index</b>, split into small shards by term prefix. To search for "vase", you fetch <b>only the shard for "vas…"</b> and rank the results yourself. Because the index is deterministic, <b>two honest indexers produce identical bytes</b>, and if one quietly leaves a model out, its creator notices and holds a signed proof.</p>
+  <div class="card">
+  <svg viewBox="0 0 1200 440">
+    <rect class="boxd" x="30" y="40" width="260" height="120" rx="16"/><text class="tk" x="50" y="75">Indexer (a hub)</text><text class="tk" x="50" y="102" style="font-weight:500">folds the whole catalogue,</text><text class="tk" x="50" y="124" style="font-weight:500">every ~30 minutes</text>
+    <rect class="box" x="360" y="30" width="200" height="50" rx="10"/><text class="t" x="378" y="61">shard "bra…"</text>
+    <rect class="boxs" x="360" y="90" width="200" height="50" rx="10"/><text class="tk" x="378" y="121">shard "vas…"</text>
+    <rect class="box" x="360" y="150" width="200" height="50" rx="10"/><text class="t" x="378" y="181">shard per category</text>
+    <rect class="box" x="360" y="210" width="200" height="50" rx="10"/><text class="t" x="378" y="241">model records</text>
+    <path class="lnd" d="M290 100 L358 60"/><path class="lnd" d="M290 100 L358 115"/><path class="lnd" d="M290 100 L358 175"/><path class="lnd" d="M290 100 L358 235"/>
+    <rect class="box" x="620" y="60" width="250" height="110" rx="14"/><text class="t" x="640" y="92">Signed manifest</text><text class="ts" x="640" y="118">epoch, catalogue root,</text><text class="ts" x="640" y="138">each shard's CID + hash</text><text class="ts" x="640" y="158">(sent over Messaging)</text>
+    <path class="ln" d="M560 115 L618 115"/>
+    <rect class="boxs" x="930" y="40" width="240" height="150" rx="16"/><text class="tk" x="950" y="75">Your search "vase"</text><text class="tk" x="950" y="104" style="font-weight:500">1 · newest manifest</text><text class="tk" x="950" y="128" style="font-weight:500">2 · fetch only "vas…"</text><text class="tk" x="950" y="152" style="font-weight:500">3 · rank locally</text><text class="tk" x="950" y="176" style="font-weight:500">4 · verify signatures</text>
+    <path class="ln" d="M870 115 L928 115"/>
+    <!-- audit -->
+    <rect class="box" x="30" y="300" width="560" height="120" rx="14"/>
+    <text class="t" x="50" y="332">Nobody has to trust the indexer</text>
+    <text class="ts" x="50" y="358">· results are the creators' own signed events</text>
+    <text class="ts" x="50" y="380">· several indexers should agree byte for byte ("1 of 4 agree")</text>
+    <text class="ts" x="50" y="402">· creators check their own models are in every index</text>
+    <rect class="box" x="610" y="300" width="560" height="120" rx="14"/>
+    <text class="t" x="630" y="332">Censorship, the honest version</text>
+    <text class="ts" x="630" y="358">· a hub may refuse content, but must declare what it drops</text>
+    <text class="ts" x="630" y="380">· a silent omission is provable with the hub's own signature</text>
+    <text class="ts" x="630" y="402">· if every hub colludes, anyone can start a new one</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ======================================================= 6 -->
+<section id="privacy">
+  <h2>6 · Privacy: what's private and what isn't <span class="tag partial">partly</span></h2>
+  <p class="say">Swamp is a <b>public</b> library: everything you publish is signed and permanent. The privacy story is about <b>what you look at and download</b>. Browsing your own categories is fully private. Searching and downloading still leak something today, mostly because the network's mixnet isn't working yet.</p>
+  <div class="card">
+  <table>
+    <tr><th style="width:28%">What you do</th><th style="width:18%">Private?</th><th>Who can learn what</th></tr>
+    <tr><td>Browse categories you follow</td><td class="yes">yes</td><td>Nobody. It's your local copy, and it works offline.</td></tr>
+    <tr><td>Follow a category</td><td class="meh">mostly</td><td>Peers on the network can see that your node listens on that topic, not what you open.</td></tr>
+    <tr><td>Search everything ("Everywhere")</td><td class="meh">partly</td><td>Whoever serves the index shard learns the <b>term prefix</b> ("vas…") and your node's address. Built to go over the mixnet so they wouldn't know who asked, but it's switched off until the network's mixnet works.</td></tr>
+    <tr><td>Download a model</td><td class="no">no</td><td>The holder (often a hub) sees which file you fetched and your node's address.</td></tr>
+    <tr><td>Publish, like, comment</td><td class="no">public by design</td><td>Signed by your key and permanent. Your key is a pseudonym, not a real name: one key per device, no account. Don't publish what you don't want public.</td></tr>
+    <tr><td>Your identity</td><td class="yes">yours</td><td>A key on your device (or a hardware Keycard later). No email, no login, no company that holds it.</td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ======================================================= 7 -->
+<section id="chain">
+  <h2>7 · What the blockchain is for (LEZ) <span class="tag planned">planned</span></h2>
+  <p class="say">Swamp works without a chain today. We'd add LEZ, the Logos execution zone, for two things a log of signatures can't do alone. <b>Time</b>: proving <i>when</i> something existed, so "who published first" holds up when someone copies a model. And <b>money</b>: tips first, paid models later. Only small roots and payments go on chain; models, files and the index stay off it.</p>
+  <div class="card">
+  <svg viewBox="0 0 1200 480">
+    <!-- anchoring -->
+    <text class="t" x="30" y="40">Anchoring: "this existed by then"</text>
+    <rect class="box" x="30" y="60" width="230" height="100" rx="14"/><text class="t" x="50" y="92">Versions published</text><text class="ts" x="50" y="116">this epoch, each signed</text><text class="ts" x="50" y="136">by its creator</text>
+    <rect class="boxd" x="320" y="60" width="220" height="100" rx="14"/><text class="tk" x="340" y="92">Hub builds one</text><text class="tk" x="340" y="116" style="font-weight:500">Merkle root of all</text><text class="tk" x="340" y="138" style="font-weight:500">version hashes</text>
+    <rect class="boxs" x="600" y="60" width="230" height="100" rx="14"/><text class="tk" x="620" y="92">LEZ</text><text class="tk" x="620" y="116" style="font-weight:500">one small transaction</text><text class="tk" x="620" y="138" style="font-weight:500">per epoch, not per model</text>
+    <rect class="box" x="890" y="60" width="280" height="100" rx="14"/><text class="t" x="910" y="92">Each creator gets</text><text class="ts" x="910" y="116">an inclusion proof: "my v1</text><text class="ts" x="910" y="136">existed before your copy"</text>
+    <path class="ln" d="M260 110 L318 110"/><path class="ln" d="M540 110 L598 110"/><path class="ln" d="M830 110 L888 110"/>
+    <text class="ts" x="30" y="190">Also anchored: the index manifest and catalogue root, so a snapshot can't be backdated. Private drafts: anchor a salted commitment now, reveal it only in a dispute.</text>
+    <!-- payments -->
+    <text class="t" x="30" y="250">Payments, in phases</text>
+    <rect class="boxs" x="30" y="270" width="350" height="120" rx="14"/><text class="tk" x="50" y="302">Phase 1 · free + tips</text><text class="tk" x="50" y="330" style="font-weight:500">models stay free; optional</text><text class="tk" x="50" y="352" style="font-weight:500">public tips to the creator</text>
+    <rect class="box" x="425" y="270" width="350" height="120" rx="14"/><text class="t" x="445" y="302">Phase 2 · paid models</text><text class="ts" x="445" y="330">a purchase program on LEZ; the file key</text><text class="ts" x="445" y="352">comes from the seller or their hub</text>
+    <rect class="box" x="820" y="270" width="350" height="120" rx="14"/><text class="t" x="840" y="302">Phase 3 · fair exchange</text><text class="ts" x="840" y="330">deliver-or-refund escrow,</text><text class="ts" x="840" y="352">arbiters for disputes</text>
+    <path class="ln" d="M380 330 L423 330"/><path class="ln" d="M775 330 L818 330"/>
+    <rect class="boxw" x="30" y="415" width="1140" height="50" rx="12"/>
+    <text class="tw" x="50" y="446">Status: designed (ADRs 0004, 0005, 0007), not built. LEZ is on a test network that resets; the payment programs don't exist yet.</text>
+  </svg>
+  </div>
+</section>
+
+<footer>Swamp · an independent experiment built on the Logos tech stack · not endorsed by or affiliated with Logos ·
+  details in the ADRs: <a style="color:#b8f26b" href="https://github.com/vpavlin/swamp3d/tree/main/docs/adr">docs/adr</a></footer>
+</body>
+</html>
