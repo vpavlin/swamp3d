@@ -9,3 +9,4 @@ swamp_core/test/fake-orca-args.txt
 swamp_core/test/result.json
 *.log
 result.json
+dist/
