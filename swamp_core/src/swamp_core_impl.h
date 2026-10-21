@@ -96,6 +96,8 @@ private:
     std::string blobPath(const std::string& sha) const;
     bool haveBlob(const std::string& sha) const;
     bool wantedByJob(const std::string& sha);
+    swamp::json fetchState(const std::string& sha, long long size);
+    swamp::json pendingParts(const swamp::json& mf, const std::vector<std::string>& keys);
     std::string downloadState(const std::string& modelId);   // "done" / "downloading" / ""
     std::string storeBlob(const std::string& bytes);
 

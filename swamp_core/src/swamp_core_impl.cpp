@@ -31,7 +31,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.15";
+static const char* SWAMP_VERSION = "0.5.16";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
@@ -1726,7 +1726,11 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
     if (it == m_cat.models.end() || it->second.versions.empty()) {
         bool pending = false;
         if (!fetchRecord(modelId, pending)) {
-            if (pending) return json{{"ok", false}, {"pending", true}, {"error", "Fetching this model from the index..."}}.dump();
+            if (pending) {
+                json mf = bestManifest();
+                return json{{"ok", false}, {"pending", true}, {"error", "Loading this model from the index..."},
+                            {"parts", pendingParts(mf, {index::recordKeyFor(modelId)})}}.dump();
+            }
             return fail("No such model (it may not have synced yet)");
         }
         it = m_cat.models.find(modelId);
@@ -2027,6 +2031,32 @@ void SwampCoreImpl::checkInclusion() {
         }
     }
 }
+// Where a fetch stands, for the view: bytes so far, tries, how long it has been looking.
+json SwampCoreImpl::fetchState(const std::string& sha, long long size) {
+    json st{{"size", size}, {"got", 0}, {"fetching", false}, {"tries", 0}, {"waitingS", 0}};
+    auto fi = m_fetch.find(sha);
+    if (fi == m_fetch.end()) return st;
+    const Fetch& F = fi->second;
+    st["fetching"] = F.inflight;
+    st["got"] = std::max(0LL, F.seenSize);
+    st["tries"] = F.rounds + 1;
+    if (F.since > 0) st["waitingS"] = (nowMs() - F.since) / 1000;
+    if (!F.error.empty()) st["error"] = F.error;
+    return st;
+}
+// The index parts a search or an opened model still waits for.
+json SwampCoreImpl::pendingParts(const json& mf, const std::vector<std::string>& keys) {
+    json out = json::array();
+    if (mf.is_null() || !mf.contains("shards")) return out;
+    for (const auto& key : keys) {
+        if (!mf["shards"].contains(key)) continue;
+        const json& ref = mf["shards"][key];
+        std::string sha = str(ref, "sha256");
+        if (m_shardCache.count(sha) || haveBlob(sha)) continue;
+        out.push_back(fetchState(sha, num(ref, "size")));
+    }
+    return out;
+}
 // A shard the manifest names: parsed if we hold it, else queued for a private fetch (null).
 json SwampCoreImpl::shard(const json& mf, const std::string& key) {
     if (!mf.contains("shards") || !mf["shards"].contains(key)) return json::object();   // no such shard = no matches
@@ -2067,11 +2097,12 @@ std::string SwampCoreImpl::globalSearchImpl(const std::string& queryJson) {
     if (mf.is_null()) return ok(json{{"results", json::array()}, {"pending", false}, {"index", nullptr}});
     std::map<std::string, json> terms;
     bool pending = false;
+    std::vector<std::string> waitingFor;
     for (const auto& w : index::words(str(q, "q"))) {
         std::string key = index::shardKeyFor(w);
         if (terms.count(key)) continue;
         json sh = shard(mf, key);
-        if (sh.is_null()) pending = true; else terms[key] = sh;
+        if (sh.is_null()) { pending = true; waitingFor.push_back(key); } else terms[key] = sh;
     }
     json results = json::array();
     if (!pending) {
@@ -2103,7 +2134,7 @@ std::string SwampCoreImpl::globalSearchImpl(const std::string& queryJson) {
         }
     }
     int agree = (int)num(mf, "agreeing");
-    return ok(json{{"results", results}, {"pending", pending},
+    return ok(json{{"results", results}, {"pending", pending}, {"parts", pendingParts(mf, waitingFor)},
                    {"index", {{"indexer", str(mf, "indexer")}, {"indexerName", nameOf(str(mf, "indexer"))}, {"models", num(mf, "models")},
                               {"ageMs", nowMs() - num(mf, "published")}, {"indexers", m_cat.indexes.size()}, {"agreeing", agree},
                               {"privacyDowngrades", m_privacyDowngrades}, {"private", m_privateShards}, {"badShards", m_badShards}}}});

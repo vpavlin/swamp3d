@@ -53,6 +53,9 @@ Item {
     property var globalRes: []
     property var globalInfo: null
     property bool globalPending: false
+    property var globalParts: []      // index parts the search still waits for (fetchState)
+    property var openCard: null       // the card a model was opened from: shown while the rest loads
+    property var modelParts: []
     // index results you don't already see in your own categories
     readonly property var globalOthers: root.globalRes.filter(function (r) { for (var i = 0; i < root.models.length; i++) if (root.models[i].modelId === r.modelId) return false; return true })     // Browse: one category, or all of yours
     property string sortBy: "new"
@@ -116,10 +119,10 @@ Item {
             var r = root.parse(raw); if (r && r.ok) { root.models = r.models; root.tags = r.tags; root.total = r.total } fin()
         })
         if (global) root.core("globalSearch", [JSON.stringify({ q: root.query, category: root.catFilter, limit: 60 })], function (raw) {
-            var r = root.parse(raw); if (r && r.ok) { root.globalRes = r.results; root.globalInfo = r.index; root.globalPending = r.pending } fin()
+            var r = root.parse(raw); if (r && r.ok) { root.globalRes = r.results; root.globalInfo = r.index; root.globalPending = r.pending; root.globalParts = r.parts || [] } fin()
         })
         if (!root.query) { root.globalRes = []; root.globalPending = false }
-        if (root.openId) root.core("getModel", [root.openId], function (raw) { var r = root.parse(raw); if (r && r.ok) { root.model = r.model; root.modelNote = "" } else if (r) root.modelNote = r.error || ""; fin() })
+        if (root.openId) root.core("getModel", [root.openId], function (raw) { var r = root.parse(raw); if (r && r.ok) { root.model = r.model; root.modelNote = ""; root.modelParts = [] } else if (r) { root.modelNote = r.error || ""; root.modelParts = r.parts || [] } fin() })
     }
     Timer { id: busyGuard; interval: 45000; onTriggered: root.busy = false }
     Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
@@ -179,7 +182,7 @@ Item {
         }
         root.query = text; root.refresh()
     }
-    function openModel(id) { root.openId = id; root.openVersion = 0; root.shownImage = 0; root.model = null; root.refresh() }
+    function openModel(id, card) { root.openId = id; root.openCard = card || null; root.modelParts = []; root.openVersion = 0; root.shownImage = 0; root.model = null; root.refresh() }
     function presetCategory(id) { var cs = root.st.categories || []; for (var i = 0; i < cs.length; i++) if (cs[i].id === id) { pCategory.currentIndex = i; return } }
     function clearDraft() {
         root.draftFor = ""; root.draftParents = []; root.draftParentInfo = null; root.draftFiles = []; root.draftImages = []; root.draftKeep = []
@@ -378,7 +381,20 @@ Item {
             T3 { Layout.fillWidth: true; text: "by " + m.creatorName + "  ·  " + root.catLabel(m.category) + "  ·  " + m.licence + (m.remix ? "  ·  remix" : "") + (m.retracted ? "  ·  retracted" : "") }
             T3 { Layout.fillWidth: true; text: root.plural(m.likes || 0, "like", "likes") + "  ·  " + root.plural(m.makes || 0, "make", "makes") + "  ·  v" + m.latest }
         }
-        MouseArea { id: hov; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.openModel(m.modelId) }
+        MouseArea { id: hov; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.openModel(m.modelId, m) }
+    }
+    // index parts on their way: bytes once they flow, else how long we've been looking for a holder
+    component PartsProgress: ColumnLayout {
+        property var parts: []
+        spacing: 4
+        Repeater {
+            model: parts
+            delegate: RowLayout { spacing: root.spS
+                SlimeBar { Layout.preferredWidth: 200; frac: modelData.size > 0 ? Math.min(1, (modelData.got || 0) / modelData.size) : 0 }
+                T3 { text: (modelData.got || 0) > 0 ? root.size(modelData.got) + " of " + root.size(modelData.size)
+                         : "looking for a holder" + (modelData.tries > 1 ? " (try " + modelData.tries + ")" : "") + (modelData.waitingS > 0 ? ", " + modelData.waitingS + " s" : "") + "..." }
+            }
+        }
     }
     // a progress bar in the website's colours
     component SlimeBar: Rectangle {
@@ -570,6 +586,7 @@ Item {
                                   root.plural(root.globalInfo.models, "model", "models") + "  ·  " + root.globalInfo.agreeing + " of " + root.plural(root.globalInfo.indexers, "indexer", "indexers") + " agree" +
                                   (root.globalInfo.private ? (root.globalInfo.privacyDowngrades ? "  ·  " + root.globalInfo.privacyDowngrades + " fetches fell back to non-private" : "  ·  fetched privately") : "  ·  not private yet: the storage network's mixnet isn't working, so the hub serving the index can see which piece you fetched") }
                         T2 { visible: root.globalPending; text: "Fetching the part of the index this search needs..." }
+                        PartsProgress { visible: root.globalPending; parts: root.globalParts }
                         T2 { visible: !root.globalPending && !!root.globalInfo && root.globalOthers.length === 0; text: "No other matches." }
                         GridLayout {
                             Layout.fillWidth: true
@@ -589,7 +606,23 @@ Item {
                         Layout.fillWidth: true
                         SwampButton { text: "< Back"; onClicked: { root.openId = ""; root.model = null; root.refresh() } }
                         Item { Layout.fillWidth: true }
-                        T3 { visible: !root.model; text: root.modelNote || "loading..." }
+                        T3 { visible: !root.model && !root.openCard; text: root.modelNote || "loading..." }
+                    }
+                    // what the card already told us, while the rest of the model loads
+                    Card {
+                        visible: !root.model && !!root.openCard
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: root.sp
+                            Thumb { Layout.preferredWidth: 300; Layout.preferredHeight: 300; Layout.alignment: Qt.AlignTop
+                                path: root.openCard ? (root.openCard.thumb || root.openCard.thumbSha || "") : "" }
+                            ColumnLayout { Layout.fillWidth: true; Layout.alignment: Qt.AlignTop; spacing: root.spS
+                                T1 { Layout.fillWidth: true; font.pixelSize: 20; text: root.openCard ? root.openCard.title || "" : "" }
+                                T3 { Layout.fillWidth: true; text: !root.openCard ? "" : "by " + (root.openCard.creatorName || "") + "  ·  " + root.catLabel(root.openCard.category) + "  ·  " + (root.openCard.licence || "") }
+                                T2 { Layout.fillWidth: true; visible: !!(root.openCard && root.openCard.summary); text: root.openCard ? root.openCard.summary || "" : "" }
+                                T2 { color: root.cDuck; text: root.modelNote || "Loading the rest of this model..." }
+                                PartsProgress { parts: root.modelParts }
+                            }
+                        }
                     }
                     Card {
                         visible: !!root.model
