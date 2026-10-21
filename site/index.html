@@ -180,7 +180,8 @@
   <div class="wrap">
     <h2>How it works</h2>
     <p class="muted" style="max-width:46em">A desktop app for Logos Basecamp. Under the hood: signed event logs over
-      Logos Messaging, files in Logos Storage, and soon priority proofs anchored on LEZ, the Logos execution zone.</p>
+      Logos Messaging, files in Logos Storage, and later priority proofs anchored on LEZ, the Logos execution zone.
+      <a href="how.html" style="color:var(--slime2,#b8f26b)">See it in diagrams →</a></p>
     <div class="grid">
       <div class="card"><svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 10l11-5 11 5v12l-11 5-11-5z"/><path d="M5 10l11 5 11-5M16 15v12"/></g></svg><h3>Publish</h3><p>Drop in your STL and photos. Swamp hashes every
         file, renders a thumbnail and takes a shape fingerprint. The listing goes out at once, and files upload in the
@@ -209,11 +210,11 @@
     <h2>A look into the bog</h2>
     <p class="muted">Real screenshots from Basecamp 0.3.1, synced over the Logos test network. Click to enlarge.</p>
     <div class="shots">
-      <figure><img src="img/browse.png" alt="Browse: a grid of models with thumbnails"><figcaption>Browse the categories you follow</figcaption></figure>
-      <figure><img src="img/search.png" alt="Search results from the index"><figcaption>"Everywhere": results from an index snapshot, plus how many indexers agree</figcaption></figure>
-      <figure><img src="img/model.png" alt="A remix with its parent link and photo gallery"><figcaption>A remix links its original, with a gallery of the creator's photos</figcaption></figure>
+      <figure><img src="img/browse.png" alt="Browse: a grid of models with thumbnails, two marked Downloaded"><figcaption>Browse the categories you follow; what you've downloaded is marked</figcaption></figure>
+      <figure><img src="img/search.png" alt="Search results: your categories first, then the index"><figcaption>Search: your own categories first, then "Everywhere" from an index snapshot, with how many indexers agree</figcaption></figure>
+      <figure><img src="img/model.png" alt="A model page with Download, Open folder and Open in slicer"><figcaption>A model page: download (verified), open the folder, or open it in your slicer</figcaption></figure>
       <figure><img src="img/make.png" alt="A make posted with a photo"><figcaption>Makes: "I printed it, here's how it went"</figcaption></figure>
-      <figure><img src="img/categories.png" alt="Category subscriptions"><figcaption>Pick what lives in your corner of the swamp</figcaption></figure>
+      <figure><img src="img/categories.png" alt="Categories you follow, and the slicer Swamp opens models in"><figcaption>Pick what lives in your corner of the swamp, and which slicer to use</figcaption></figure>
       <figure><img src="img/retract.png" alt="Retract dialog"><figcaption>Retract your own model: it hides, with your reason</figcaption></figure>
     </div>
   </div>
@@ -278,7 +279,8 @@
       <li class="done"><span>Creators audit the indexers. <small>A hub that silently leaves your model out gets caught with its own signature; a declared exclusion is shown as policy.</small></span></li>
       <li class="done"><span>Open in your slicer, with one-click OrcaSlicer setup. <small>Printing straight to a Bambu Lab A1 over the LAN exists as a switched-off experiment: in its first real test the printer drove its head into the top of its frame, so it stays off until we know why.</small></span></li>
       <li class="done"><span>Share links: send someone a model, they paste it into Swamp.</span></li>
-      <li><span>An always-on hub, so two people behind home routers can share files.</span></li>
+      <li class="done"><span>An always-on hub, so two people behind home routers can share files. <small>It pulls a new model's files while the publisher is online and serves them to everyone after; a 17 MB model went publisher → hub → laptop in one go.</small></span></li>
+      <li class="done"><span>Downloads you can watch: progress per file, a Downloaded list, your slicer of choice. <small>Bambu Studio, OrcaSlicer or PrusaSlicer, found automatically or picked by hand; Open folder takes you to the verified files.</small></span></li>
       <li><span>Copy labels for exact and whole-object copies.</span></li>
       <li><span>"Who published first" anchored on LEZ.</span></li>
       <li><span>Live anonymous query hubs, and sharing evidence between nodes.</span></li>
