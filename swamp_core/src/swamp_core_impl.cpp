@@ -31,7 +31,7 @@
 using namespace swamp;
 namespace fs = std::filesystem;
 
-static const char* SWAMP_VERSION = "0.5.14";
+static const char* SWAMP_VERSION = "0.5.15";
 static constexpr int kStartDelayMs = 1000;          // 0.3 runtime rejects calls from inside onContextReady
 static constexpr int kStorageTimeoutMs = 60000;     // storage 3.x waits up to 30 s for a manifest
 static constexpr long long kCatchupBehindMs = 15000;  // while the last round still brought events in
@@ -1746,6 +1746,8 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
                 f["cids"] = m_cat.cids.count(sha) ? m_cat.cids.at(sha).size() : 0;
                 auto fi = m_fetch.find(sha);
                 f["fetching"] = fi != m_fetch.end() && fi->second.inflight;
+                // bytes so far, from the part file pollStorage watches: progress over slow relays too
+                if (fi != m_fetch.end() && fi->second.inflight) f["got"] = std::max(0LL, fi->second.seenSize);
                 if (fi != m_fetch.end() && !fi->second.error.empty()) f["fetchError"] = fi->second.error;
             }
         }
@@ -1766,7 +1768,16 @@ std::string SwampCoreImpl::getModel(std::string modelId) {
             }
         std::string key = modelId + "@" + std::to_string(v.value("v", 0));
         auto jt = m_jobs.find(key);
-        if (jt != m_jobs.end()) vv["download"] = {{"status", jt->second.status}, {"dir", jt->second.dir}, {"error", jt->second.error}};
+        if (jt != m_jobs.end()) {
+            vv["download"] = {{"status", jt->second.status}, {"dir", jt->second.dir}, {"error", jt->second.error}};
+            long long got = 0, total = 0;
+            for (const auto& f : vv.value("files", json::array())) {
+                long long sz = f.value("size", 0LL);
+                total += sz;
+                got += !f["local"].is_null() ? sz : std::min(sz, f.value("got", 0LL));
+            }
+            vv["download"]["got"] = got; vv["download"]["total"] = total;
+        }
         versions.push_back(vv);
     }
     auto withNames = [&](const std::vector<json>& items) {

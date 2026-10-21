@@ -380,6 +380,13 @@ Item {
         }
         MouseArea { id: hov; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.openModel(m.modelId) }
     }
+    // a progress bar in the website's colours
+    component SlimeBar: Rectangle {
+        property real frac: 0
+        implicitHeight: 8; radius: 4; color: root.cInset; border.color: root.cLine
+        Rectangle { width: Math.max(parent.height, parent.width * parent.frac); height: parent.height; radius: 4; color: root.cPrimary
+            visible: parent.frac > 0; Behavior on width { NumberAnimation { duration: 400 } } }
+    }
     component Thumb: Rectangle {
         property string path: ""
         color: root.cInset; radius: root.rad; clip: true
@@ -624,7 +631,7 @@ Item {
                                 // fixed slots: a button never moves because another one appeared
                                 RowLayout {
                                     spacing: root.spS
-                                    SwampButton { primary: true; Layout.preferredWidth: 140; text: { var d = root.ver() && root.ver().download; return d ? (d.status === "done" ? "Download again" : d.status === "failed" ? "Retry download" : "Downloading...") : "Download" }
+                                    SwampButton { primary: true; Layout.preferredWidth: 170; text: { var d = root.ver() && root.ver().download; return d ? (d.status === "done" ? "Download again" : d.status === "failed" ? "Retry download" : d.total > 0 && d.got > 0 ? "Downloading " + Math.floor(100 * d.got / d.total) + " %" : "Downloading...") : "Download" }
                                         onClicked: root.act("download", [root.model.modelId, String(root.ver().v)], "Downloading into your Swamp folder") }
                                     SwampButton { Layout.preferredWidth: 110; enabled: !!(root.ver() && root.ver().download && root.ver().download.status === "done"); text: "Open folder"
                                         // the core opens it: Basecamp 0.3 views can't open local paths themselves
@@ -687,8 +694,13 @@ Item {
                             delegate: RowLayout {
                                 Layout.fillWidth: true
                                 T2 { Layout.fillWidth: true; text: modelData.name + "  (" + root.size(modelData.size) + ", " + modelData.kind + ")" }
+                                // bytes as they arrive: slow over a relay, but you see it moving
+                                SlimeBar { visible: !modelData.local && !!modelData.fetching; Layout.preferredWidth: 200
+                                    frac: modelData.size > 0 ? Math.min(1, (modelData.got || 0) / modelData.size) : 0 }
                                 T3 { color: modelData.local ? root.cOk : (modelData.cids > 0 ? root.cText3 : root.cWarn)
-                                    text: modelData.local ? "on this device" : modelData.fetching ? "fetching..." : modelData.cids > 0 ? "available" : "not uploaded yet" }
+                                    text: modelData.local ? "on this device"
+                                        : modelData.fetching ? ((modelData.got || 0) > 0 ? root.size(modelData.got) + " of " + root.size(modelData.size) + "  " + Math.floor(100 * modelData.got / Math.max(1, modelData.size)) + " %" : "looking for a holder...")
+                                        : modelData.cids > 0 ? "available" : "not uploaded yet" }
                             }
                         }
                         T3 { Layout.fillWidth: true; text: "Every file is checked against its SHA-256 before it's saved. Open the folder and drop the STL/3MF into your slicer." }

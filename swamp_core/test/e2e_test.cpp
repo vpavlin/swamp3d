@@ -114,6 +114,8 @@ int main(int argc, char** argv) {
         json all = json::parse(bob->core.listModels("{}"));
         bool flagged = false; for (const auto& c : all["models"]) if (c["modelId"] == mid) flagged = c["downloaded"] == "done";
         CHECK(flagged, "...and Browse marks the card as downloaded");
+        json dv = json::parse(bob->core.getModel(mid))["model"]["versions"][0]["download"];
+        CHECK(dv.value("total", 0LL) > 0 && dv.value("got", -1LL) == dv.value("total", 0LL), "a finished download reports all its bytes (" + dv.dump() + ")");
         CHECK(json::parse(alice->core.listModels(json{{"downloaded", true}}.dump()))["total"] == 0, "...alice downloaded nothing");
         json of = json::parse(alice->core.openFolder(mid, "1"));
         CHECK(!of.value("ok", true) && of.value("error", "").find("Download") != std::string::npos, "Open folder refuses a version that isn't downloaded (" + of.dump() + ")");
