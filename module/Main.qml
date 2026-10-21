@@ -353,9 +353,8 @@ Item {
         Layout.fillWidth: true; Layout.maximumWidth: 420; Layout.preferredHeight: 300
         color: root.cCard; radius: root.radCard; border.color: hov.containsMouse ? root.cPrimary : root.cLine
         border.width: hov.containsMouse ? 2 : 1
-        // a little lift, like the website's cards
-        y: hov.containsMouse ? -3 : 0
-        Behavior on y { NumberAnimation { duration: 120 } }
+        // a little lift, like the website's cards: a transform, so the grid keeps owning y
+        transform: Translate { y: hov.containsMouse ? -3 : 0; Behavior on y { NumberAnimation { duration: 120 } } }
         ColumnLayout {
             anchors.fill: parent; anchors.margins: root.spS; spacing: 4
             Thumb { Layout.fillWidth: true; Layout.preferredHeight: 190; path: m.thumb || m.thumbSha || "" }
